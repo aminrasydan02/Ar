@@ -1,0 +1,563 @@
+'use strict';
+// Sheet Metal Manager web client. Plain JavaScript, no build step.
+// Forms and lists are built from the module definitions served at /api/meta.
+
+const state = { user: null, rights: null, meta: null, version: '' };
+
+// ---------- helpers ----------------------------------------------------------
+
+function h(tag, attrs, ...children) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v === null || v === undefined || v === false) continue;
+    if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+    else if (k === 'class') el.className = v;
+    else if (k === 'value') el.value = v;
+    else el.setAttribute(k, v === true ? '' : v);
+  }
+  for (const c of children.flat(Infinity)) {
+    if (c === null || c === undefined || c === false) continue;
+    el.append(c instanceof Node ? c : document.createTextNode(String(c)));
+  }
+  return el;
+}
+
+async function api(method, url, body, raw) {
+  const opts = { method, headers: {} };
+  if (raw) { opts.body = raw; opts.headers['Content-Type'] = 'application/octet-stream'; }
+  else if (body !== undefined) { opts.body = JSON.stringify(body); opts.headers['Content-Type'] = 'application/json'; }
+  const res = await fetch(url, opts);
+  if (res.status === 401 && !url.endsWith('/login')) { state.user = null; renderLogin(); throw new Error('Please sign in'); }
+  if (res.status === 204) return null;
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `Error ${res.status}`);
+  return data;
+}
+
+function toast(text, isError) {
+  const t = h('div', { class: `toast${isError ? ' err' : ''}` }, text);
+  document.body.append(t);
+  setTimeout(() => t.remove(), isError ? 6000 : 3000);
+}
+
+const STATUS_CLASS = {
+  'Completed': 'ok', 'Done': 'ok', 'Closed': 'ok', 'Running': 'ok', 'Current': 'ok', 'Good': 'ok',
+  'In progress': 'warn', 'Open': 'warn', 'Maintenance': 'warn', 'Worn': 'warn', 'On hold': 'warn', 'Idle': 'info', 'Planned': 'info',
+  'Down': 'bad', 'Damaged': 'bad', 'Cancelled': 'bad', 'Superseded': '', 'Scrapped': 'bad', 'Breakdown': 'bad',
+};
+const pill = (v) => h('span', { class: `pill ${STATUS_CLASS[v] ?? ''}` }, v);
+
+function cellValue(field, row) {
+  const v = field.type === 'ref' ? row[`${field.name}__label`] : row[field.name];
+  if (v === null || v === undefined || v === '') return '';
+  if (field.name === 'status' || field.name === 'condition' || field.name === 'kind') return pill(v);
+  if (field.type === 'number') return Number(v).toLocaleString();
+  return String(v);
+}
+
+const right = (res, action) => !!(state.rights && state.rights[res] && state.rights[res][action]);
+const content = () => document.getElementById('content');
+
+// ---------- forms ------------------------------------------------------------
+
+const refCache = {};
+async function refOptions(resName) {
+  if (!refCache[resName]) refCache[resName] = api('GET', `/api/${resName}`);
+  const rows = await refCache[resName];
+  const display = state.meta.resources[resName].display;
+  return rows.map((r) => ({ id: r.id, label: r[display] })).sort((a, b) => String(a.label).localeCompare(String(b.label)));
+}
+function clearRefCache(resName) { delete refCache[resName]; }
+
+async function buildInput(field, value, editable) {
+  if (!editable || field.readonly) {
+    return h('div', { class: 'ro' }, value === null || value === undefined ? '—' : String(value));
+  }
+  const attrs = { name: field.name, id: `f_${field.name}`, required: field.required };
+  if (field.type === 'textarea') return h('textarea', attrs, value ?? '');
+  if (field.type === 'select') {
+    return h('select', attrs, h('option', { value: '' }, ''),
+      field.options.map((o) => h('option', { value: o, selected: o === value }, o)));
+  }
+  if (field.type === 'ref') {
+    const opts = await refOptions(field.ref);
+    return h('select', attrs, h('option', { value: '' }, ''),
+      opts.map((o) => h('option', { value: o.id, selected: o.id === value }, o.label)));
+  }
+  return h('input', { ...attrs, type: field.type === 'number' ? 'number' : field.type === 'date' ? 'date' : 'text',
+    step: field.type === 'number' ? 'any' : null, value: value ?? '' });
+}
+
+function openModal(title, body, buttons) {
+  const overlay = h('div', { class: 'overlay' });
+  const close = () => overlay.remove();
+  overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) close(); });
+  overlay.append(h('div', { class: 'modal', role: 'dialog' },
+    h('header', {}, title, h('button', { class: 'x', onclick: close, 'aria-label': 'Close' }, '×')),
+    h('div', { class: 'body' }, body),
+    h('footer', {}, buttons(close))));
+  document.body.append(overlay);
+  const first = overlay.querySelector('input, select, textarea');
+  if (first) first.focus();
+  return close;
+}
+
+// Opens the add/edit form for one record. `preset` fills fields for a new record.
+async function editRecord(resName, row, preset, onSaved) {
+  const res = state.meta.resources[resName];
+  const isNew = !row;
+  const editable = isNew ? right(resName, 'create') : right(resName, 'update');
+  const values = { ...(preset || {}), ...(row || {}) };
+  if (isNew) for (const f of res.fields) if (values[f.name] === undefined && f.default !== undefined) values[f.name] = f.default;
+
+  const err = h('div');
+  const form = h('form', { class: 'form' });
+  for (const f of res.fields) {
+    if (isNew && f.readonly) continue;
+    const shown = f.type === 'ref' && !editable ? row && row[`${f.name}__label`] : values[f.name];
+    form.append(h('div', { class: f.type === 'textarea' ? 'full' : '' },
+      h('label', { for: `f_${f.name}` }, f.label, f.required && editable ? ' *' : ''),
+      await buildInput(f, shown, editable),
+      f.help && editable ? h('div', { class: 'help' }, f.help) : null));
+  }
+
+  async function save(close) {
+    const data = {};
+    for (const f of res.fields) {
+      const el = form.elements[f.name];
+      if (el) data[f.name] = el.value;
+    }
+    try {
+      const saved = isNew ? await api('POST', `/api/${resName}`, data) : await api('PUT', `/api/${resName}/${row.id}`, data);
+      clearRefCache(resName);
+      close();
+      toast(`${res.singular} saved`);
+      if (onSaved) onSaved(saved);
+    } catch (e) {
+      err.replaceChildren(h('div', { class: 'msg err' }, e.message));
+    }
+  }
+  form.addEventListener('submit', (e) => e.preventDefault());
+
+  openModal(isNew ? `New ${res.singular}` : `${res.singular}: ${row[res.display] ?? row.id}`,
+    [err, form],
+    (close) => [
+      !isNew && right(resName, 'delete') ? h('button', { class: 'btn danger left', onclick: async () => {
+        if (!window.confirm(`Delete this ${res.singular.toLowerCase()}? This cannot be undone.`)) return;
+        try { await api('DELETE', `/api/${resName}/${row.id}`); clearRefCache(resName); close(); toast('Deleted'); if (onSaved) onSaved(null); }
+        catch (e) { err.replaceChildren(h('div', { class: 'msg err' }, e.message)); }
+      } }, 'Delete') : null,
+      !isNew && resName === 'ncrs' ? h('a', { class: 'btn left', href: `#/ncr/${row.id}/print` , onclick: close }, 'Print / PDF') : null,
+      h('button', { class: 'btn', onclick: close }, editable ? 'Cancel' : 'Close'),
+      editable ? h('button', { class: 'btn primary', onclick: () => save(close) }, 'Save') : null,
+    ]);
+}
+
+// ---------- generic list -----------------------------------------------------
+
+// A searchable table for one module. `filter` limits rows (e.g. { project_id: 3 }),
+// `extra` adds buttons to the toolbar, `rowActions` adds buttons to each row.
+function recordTable(resName, { filter = {}, extra = [], rowActions, columns } = {}) {
+  const res = state.meta.resources[resName];
+  const fields = res.fields.filter((f) => f.list !== false && (!columns || columns.includes(f.name)));
+  const wrap = h('div');
+  const search = h('input', { type: 'search', placeholder: `Search ${res.label.toLowerCase()}…` });
+  const tableBox = h('div', { class: 'table-wrap' });
+  const count = h('span', { class: 'muted' });
+
+  async function load() {
+    const qs = new URLSearchParams({ ...filter, ...(search.value ? { q: search.value } : {}) });
+    try {
+      const rows = await api('GET', `/api/${resName}?${qs}`);
+      count.textContent = `${rows.length} record${rows.length === 1 ? '' : 's'}`;
+      if (!rows.length) { tableBox.replaceChildren(h('div', { class: 'empty' }, 'No records yet.')); return; }
+      tableBox.replaceChildren(h('table', {},
+        h('thead', {}, h('tr', {}, fields.map((f) => h('th', {}, f.label)), rowActions ? h('th', {}, '') : null)),
+        h('tbody', {}, rows.map((r) => h('tr', { class: 'click', onclick: () => editRecord(resName, r, null, load) },
+          fields.map((f) => h('td', { class: f.type === 'number' ? 'num' : '' }, cellValue(f, r))),
+          rowActions ? h('td', { onclick: (e) => e.stopPropagation() }, rowActions(r, load)) : null)))));
+    } catch (e) { tableBox.replaceChildren(h('div', { class: 'msg err' }, e.message)); }
+  }
+  let timer;
+  search.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(load, 250); });
+
+  wrap.append(h('div', { class: 'toolbar' },
+    search, count, h('span', { class: 'grow' }),
+    extra,
+    right(resName, 'export') ? h('a', { class: 'btn', href: `/api/${resName}/export.csv?${new URLSearchParams(filter)}` }, 'Export CSV') : null,
+    right(resName, 'create') ? h('button', { class: 'btn primary', onclick: () => editRecord(resName, null, filter, load) }, `+ New ${res.singular}`) : null),
+    tableBox);
+  load();
+  wrap.reload = load;
+  return wrap;
+}
+
+// ---------- views ------------------------------------------------------------
+
+async function viewDashboard() {
+  const d = await api('GET', '/api/dashboard');
+  const k = d.kpi;
+  const tile = (n, l, alert) => h('div', { class: `kpi${alert && n ? ' alert' : ''}` }, h('div', { class: 'n' }, Number(n).toLocaleString()), h('div', { class: 'l' }, l));
+  return [
+    h('h1', {}, 'Dashboard'),
+    h('div', { class: 'kpis' },
+      tile(k.active_projects, 'Active projects'), tile(k.parts, 'Parts'), tile(k.total_pcs, 'Total pieces'),
+      tile(k.drawings, 'Current drawings'), tile(k.open_ncrs, 'Open NCRs', true), tile(k.open_work_orders, 'Open maintenance', true),
+      tile(k.machines_down, 'Machines down', true), tile(k.low_stock, 'Plates at/below minimum', true)),
+    h('h2', {}, 'Projects'),
+    d.projects.length ? h('div', { class: 'table-wrap' }, h('table', {},
+      h('thead', {}, h('tr', {}, ['Project', 'Name', 'Customer', 'Due', 'Status', 'Parts', 'Progress'].map((t) => h('th', {}, t)))),
+      h('tbody', {}, d.projects.map((p) => {
+        const pct = p.steps ? Math.round((p.steps_done / p.steps) * 100) : 0;
+        const bar = h('div');
+        bar.style.width = `${pct}%`;
+        return h('tr', { class: 'click', onclick: () => { location.hash = `#/project/${p.id}`; } },
+          h('td', {}, p.code), h('td', {}, p.name), h('td', {}, p.customer || ''), h('td', {}, p.due_date || ''),
+          h('td', {}, pill(p.status)), h('td', { class: 'num' }, p.parts),
+          h('td', {}, h('div', { class: 'bar', title: `${p.steps_done}/${p.steps} steps` }, bar), ` ${pct}%`));
+      })))) : h('div', { class: 'panel muted' }, 'No active projects.'),
+    h('h2', {}, 'Workflow board'),
+    d.workflow.length ? h('div', { class: 'table-wrap' }, h('table', {},
+      h('thead', {}, h('tr', {}, ['Part', 'Project', 'Current step', 'Flow'].map((t) => h('th', {}, t)))),
+      h('tbody', {}, d.workflow.map((w) => h('tr', {},
+        h('td', {}, w.part_no), h('td', {}, w.project), h('td', {}, pill(w.current === 'Completed' ? 'Completed' : 'In progress'), ' ', w.current),
+        h('td', {}, h('div', { class: 'flow' }, w.steps.map((s) => h('span', { class: s.status === 'Done' ? 'done' : s.step === w.current ? 'doing' : '' }, s.step))))))))) :
+      h('div', { class: 'panel muted' }, 'No workflow yet. Open a part and choose "Create workflow" to build it from the routing.'),
+    h('div', { class: 'grid2' },
+      h('div', {}, h('h2', {}, `Machine load (${d.minutesPerDay} min/day)`),
+        h('div', { class: 'table-wrap' }, h('table', {},
+          h('thead', {}, h('tr', {}, ['Machine', 'Type', 'Status', 'Load (min)', 'Days'].map((t) => h('th', {}, t)))),
+          h('tbody', {}, d.load.map((m) => h('tr', {}, h('td', {}, m.code), h('td', {}, m.machine_type || ''), h('td', {}, pill(m.status)),
+            h('td', { class: 'num' }, Math.round(m.load_min).toLocaleString()), h('td', { class: 'num' }, m.load_days))))))),
+      h('div', {}, h('h2', {}, 'Maintenance, last 30 days'),
+        h('div', { class: 'table-wrap' }, h('table', {},
+          h('thead', {}, h('tr', {}, ['Machine', 'Breakdowns', 'Downtime (min)', 'Availability', 'MTBF', 'MTTR'].map((t) => h('th', {}, t)))),
+          h('tbody', {}, d.downtime.map((m) => h('tr', {}, h('td', {}, m.code), h('td', { class: 'num' }, m.breakdowns),
+            h('td', { class: 'num' }, m.downtime_min), h('td', { class: 'num' }, `${m.availability}%`),
+            h('td', { class: 'num' }, m.mtbf_min ?? '—'), h('td', { class: 'num' }, m.mttr_min ?? '—')))))))),
+    d.lowStock.length ? [h('h2', {}, 'Plates at or below minimum'), h('div', { class: 'table-wrap' }, h('table', {},
+      h('thead', {}, h('tr', {}, ['Material', 'Thickness', 'Size', 'Qty', 'Minimum'].map((t) => h('th', {}, t)))),
+      h('tbody', {}, d.lowStock.map((p) => h('tr', {}, h('td', {}, p.material), h('td', {}, p.thickness), h('td', {}, p.sheet_size || ''),
+        h('td', { class: 'num' }, p.qty), h('td', { class: 'num' }, p.min_qty))))))] : null,
+  ];
+}
+
+function viewList(resName) {
+  const res = state.meta.resources[resName];
+  if (!res) return [h('h1', {}, 'Not found')];
+  const opts = {};
+  if (resName === 'parts') opts.rowActions = workflowButton;
+  if (resName === 'projects') opts.rowActions = (r) => h('a', { class: 'btn small', href: `#/project/${r.id}` }, 'Open');
+  if (resName === 'ncrs') opts.rowActions = (r) => h('a', { class: 'btn small', href: `#/ncr/${r.id}/print` }, 'Print');
+  return [h('h1', {}, res.label), recordTable(resName, opts)];
+}
+
+function workflowButton(part, reload) {
+  if (!right('parts', 'update')) return null;
+  return h('button', { class: 'btn small', onclick: async () => {
+    try { await api('POST', `/api/parts/${part.id}/workflow`); toast(`Workflow created for ${part.part_no}`); if (reload) reload(); }
+    catch (e) { toast(e.message, true); }
+  } }, 'Create workflow');
+}
+
+function drawingActions(r) {
+  return [
+    h('a', { class: 'btn small', href: `/api/drawings/${r.id}/file`, target: '_blank', rel: 'noopener' }, 'Open'), ' ',
+    h('a', { class: 'btn small', href: `/api/drawings/${r.id}/file?download=1` }, 'Download'),
+  ];
+}
+
+function uploadBox(onDone, preset) {
+  const input = h('input', { type: 'file', multiple: true, accept: state.meta.formats.map((f) => `.${f}`).join(','), hidden: true });
+  const box = h('div', { class: 'drop' },
+    h('div', {}, 'Drop drawing files here or ', h('a', { href: '#', onclick: (e) => { e.preventDefault(); input.click(); } }, 'choose files')),
+    h('div', { class: 'muted' }, `Formats: ${state.meta.formats.join(', ')}. The part number and revision are read from the file name, e.g. "606118901_PART_1 Rev C.pdf". Older revisions become Superseded.`),
+    input);
+  async function send(files) {
+    let ok = 0;
+    for (const file of files) {
+      const qs = new URLSearchParams({ filename: file.name, ...(preset || {}) });
+      try { await api('POST', `/api/drawings/upload?${qs}`, undefined, file); ok++; }
+      catch (e) { toast(`${file.name}: ${e.message}`, true); }
+    }
+    if (ok) toast(`${ok} drawing${ok === 1 ? '' : 's'} uploaded`);
+    onDone();
+  }
+  input.addEventListener('change', () => { send([...input.files]); input.value = ''; });
+  box.addEventListener('dragover', (e) => { e.preventDefault(); box.classList.add('over'); });
+  box.addEventListener('dragleave', () => box.classList.remove('over'));
+  box.addEventListener('drop', (e) => { e.preventDefault(); box.classList.remove('over'); send([...e.dataTransfer.files]); });
+  return box;
+}
+
+function viewDrawings() {
+  const table = recordTable('drawings', { rowActions: drawingActions });
+  return [h('h1', {}, 'Drawings'), right('drawings', 'upload') ? uploadBox(() => table.reload()) : null, table];
+}
+
+async function viewProject(id) {
+  const p = await api('GET', `/api/projects/${id}`);
+  const box = h('div');
+  const tabs = [
+    ['Parts', () => partsTree(p.id)],
+    ['Routing', () => routingView(p.id)],
+    ['Laser nesting', () => recordTable('nestings', { filter: { project_id: p.id } })],
+    ['Drawings', () => projectDrawings(p.id)],
+    ['NCR', () => recordTable('ncrs', { filter: { project_id: p.id }, rowActions: (r) => h('a', { class: 'btn small', href: `#/ncr/${r.id}/print` }, 'Print') })],
+  ];
+  const bar = h('div', { class: 'tabs' });
+  function show(i) {
+    [...bar.children].forEach((b, j) => b.classList.toggle('on', i === j));
+    Promise.resolve(tabs[i][1]()).then((v) => box.replaceChildren(v));
+  }
+  tabs.forEach(([label], i) => bar.append(h('button', { onclick: () => show(i) }, label)));
+  show(0);
+  return [
+    h('div', { class: 'toolbar' }, h('h1', { class: 'grow' }, `${p.code} — ${p.name}`),
+      h('button', { class: 'btn', onclick: () => editRecord('projects', p, null, () => route()) }, right('projects', 'update') ? 'Edit project' : 'Details')),
+    h('div', { class: 'panel' }, h('div', { class: 'kpis' },
+      [['Customer', p.customer], ['Work order', p.work_order], ['Start', p.start_date], ['Due', p.due_date]].map(([l, v]) =>
+        h('div', {}, h('div', { class: 'muted' }, l), h('div', {}, v || '—'))),
+      h('div', {}, h('div', { class: 'muted' }, 'Status'), pill(p.status)))),
+    p.notes ? h('p', { class: 'muted' }, p.notes) : null,
+    h('h2', {}, 'Planning'), bar, box,
+  ];
+}
+
+// Parts with child parts listed under their parent.
+async function partsTree(projectId) {
+  const wrap = h('div');
+  async function load() {
+    const rows = await api('GET', `/api/parts?project_id=${projectId}`);
+    const byParent = new Map();
+    for (const r of rows) {
+      const key = r.parent_no && rows.some((x) => x.part_no === r.parent_no) ? r.parent_no : '';
+      if (!byParent.has(key)) byParent.set(key, []);
+      byParent.get(key).push(r);
+    }
+    const ordered = [];
+    const walk = (key, depth) => (byParent.get(key) || []).sort((a, b) => a.part_no.localeCompare(b.part_no))
+      .forEach((r) => { ordered.push([r, depth]); walk(r.part_no, depth + 1); });
+    walk('', 0);
+    const total = rows.reduce((s, r) => s + (r.qty_per_set || 1) * (r.sets || 1), 0);
+    wrap.replaceChildren(
+      h('div', { class: 'toolbar' }, h('span', { class: 'muted grow' }, `${rows.length} parts, ${total.toLocaleString()} pieces`),
+        right('parts', 'create') ? h('button', { class: 'btn primary', onclick: () => editRecord('parts', null, { project_id: projectId }, load) }, '+ New part') : null),
+      rows.length ? h('div', { class: 'table-wrap' }, h('table', {},
+        h('thead', {}, h('tr', {}, ['Part number', 'Description', 'Material', 'Thk', 'Qty/set', 'Sets', 'Pieces', 'Job sheet', ''].map((t) => h('th', {}, t)))),
+        h('tbody', {}, ordered.map(([r, depth]) => h('tr', { class: `click${depth ? ' tree-child' : ''}`, onclick: () => editRecord('parts', r, null, load) },
+          h('td', {}, depth ? '↳ ' : '', r.part_no), h('td', {}, r.description || ''), h('td', {}, r.material || ''),
+          h('td', { class: 'num' }, r.thickness ?? ''), h('td', { class: 'num' }, r.qty_per_set ?? ''), h('td', { class: 'num' }, r.sets ?? ''),
+          h('td', { class: 'num' }, ((r.qty_per_set || 1) * (r.sets || 1)).toLocaleString()), h('td', {}, r.job_sheet || ''),
+          h('td', { onclick: (e) => e.stopPropagation() }, workflowButton(r, null))))))) : h('div', { class: 'panel muted' }, 'No parts yet.'));
+  }
+  await load();
+  return wrap;
+}
+
+async function routingView(projectId) {
+  const parts = await api('GET', `/api/parts?project_id=${projectId}`);
+  if (!parts.length) return h('div', { class: 'panel muted' }, 'Add parts first.');
+  const select = h('select', {}, parts.sort((a, b) => a.part_no.localeCompare(b.part_no)).map((p) => h('option', { value: p.id }, p.part_no)));
+  const holder = h('div');
+  const show = () => holder.replaceChildren(recordTable('routings', { filter: { part_id: Number(select.value) } }));
+  select.addEventListener('change', show);
+  show();
+  return h('div', {}, h('div', { class: 'toolbar' }, h('label', {}, 'Part: '), select), holder);
+}
+
+async function projectDrawings(projectId) {
+  const parts = await api('GET', `/api/parts?project_id=${projectId}`);
+  const wrap = h('div');
+  async function load() {
+    const all = await api('GET', '/api/drawings');
+    const nos = new Set(parts.map((p) => p.part_no));
+    const rows = all.filter((d) => nos.has(d.part_no));
+    wrap.replaceChildren(
+      right('drawings', 'upload') ? uploadBox(load) : null,
+      rows.length ? h('div', { class: 'table-wrap' }, h('table', {},
+        h('thead', {}, h('tr', {}, ['Part number', 'Rev', 'Format', 'Status', 'File', ''].map((t) => h('th', {}, t)))),
+        h('tbody', {}, rows.map((d) => h('tr', {}, h('td', {}, d.part_no), h('td', {}, d.rev || ''), h('td', {}, d.format),
+          h('td', {}, pill(d.status)), h('td', {}, d.filename), h('td', {}, drawingActions(d))))))) :
+        h('div', { class: 'panel muted' }, 'No drawings for these parts yet.'));
+  }
+  await load();
+  return wrap;
+}
+
+async function viewNcrPrint(id) {
+  const n = await api('GET', `/api/ncrs/${id}`);
+  const sec = (label, value) => h('tr', {}, h('th', {}, label), h('td', { class: 'sec' }, value || ''));
+  return [
+    h('div', { class: 'print-actions' },
+      h('button', { class: 'btn primary', onclick: () => window.print() }, 'Print / Save as PDF'),
+      h('a', { class: 'btn', href: '#/r/ncrs' }, 'Back to NCR list')),
+    h('div', { class: 'print-page' },
+      h('h1', {}, 'Nonconformance Report'),
+      h('table', {},
+        h('tr', {}, h('th', {}, 'NCR no.'), h('td', {}, n.ncr_no), h('th', {}, 'Date'), h('td', {}, n.date)),
+        h('tr', {}, h('th', {}, 'Project'), h('td', {}, n.project_id__label || ''), h('th', {}, 'Part number'), h('td', {}, n.part_no || '')),
+        h('tr', {}, h('th', {}, 'Qty affected'), h('td', {}, n.qty_affected ?? ''), h('th', {}, 'Status'), h('td', {}, n.status))),
+      h('br'),
+      h('table', {},
+        sec('1. Nonconformance', n.defect), sec('2. Containment', n.containment), sec('3. Root cause', n.root_cause),
+        sec('4. Corrective action', n.corrective), sec('5. Disposition', n.disposition), sec('6. Verification', n.verification)),
+      h('br'),
+      h('table', { class: 'sign' },
+        h('tr', {}, ['Raised by', 'Reviewed by (QA)', 'Approved by'].map((t) => h('th', {}, t))),
+        h('tr', {}, h('td', {}, n.raised_by || ''), h('td', {}), h('td', {})))),
+  ];
+}
+
+async function viewUsers() {
+  const box = h('div');
+  async function load() {
+    const users = await api('GET', '/api/users');
+    box.replaceChildren(h('div', { class: 'table-wrap' }, h('table', {},
+      h('thead', {}, h('tr', {}, ['Username', 'Name', 'Role', 'Active', 'Created'].map((t) => h('th', {}, t)))),
+      h('tbody', {}, users.map((u) => h('tr', { class: 'click', onclick: () => userForm(u, load) },
+        h('td', {}, u.username), h('td', {}, u.full_name || ''), h('td', {}, h('span', { class: 'role' }, u.role)),
+        h('td', {}, u.active ? h('span', { class: 'pill ok' }, 'Active') : h('span', { class: 'pill bad' }, 'Disabled')),
+        h('td', {}, u.created_at)))))));
+  }
+  await load();
+  return [
+    h('div', { class: 'toolbar' }, h('h1', { class: 'grow' }, 'Users'), h('button', { class: 'btn primary', onclick: () => userForm(null, load) }, '+ New user')),
+    h('p', { class: 'muted' }, 'Admin: everything. Planner: view all, create and update projects, parts, routing and nesting, upload drawings, export; cannot delete. Viewer: view and export only.'),
+    box,
+  ];
+}
+
+function userForm(u, reload) {
+  const err = h('div');
+  const f = h('form', { class: 'form' },
+    h('div', {}, h('label', {}, 'Username'), u ? h('div', { class: 'ro' }, u.username) : h('input', { type: 'text', name: 'username', required: true })),
+    h('div', {}, h('label', {}, 'Full name'), h('input', { type: 'text', name: 'full_name', value: u ? u.full_name : '' })),
+    h('div', {}, h('label', {}, 'Role'), h('select', { name: 'role' }, state.meta.roles.map((r) => h('option', { value: r, selected: u ? u.role === r : r === 'viewer' }, r)))),
+    h('div', {}, h('label', {}, u ? 'New password (leave empty to keep)' : 'Password (8+ characters)'), h('input', { type: 'password', name: 'password', autocomplete: 'new-password' })),
+    u ? h('div', {}, h('label', {}, h('input', { type: 'checkbox', name: 'active', checked: u.active }), ' Active')) : null);
+  f.addEventListener('submit', (e) => e.preventDefault());
+  openModal(u ? `User: ${u.username}` : 'New user', [err, f], (close) => [
+    u && u.id !== state.user.id ? h('button', { class: 'btn danger left', onclick: async () => {
+      if (!window.confirm(`Delete user ${u.username}?`)) return;
+      try { await api('DELETE', `/api/users/${u.id}`); close(); reload(); } catch (e) { err.replaceChildren(h('div', { class: 'msg err' }, e.message)); }
+    } }, 'Delete') : null,
+    h('button', { class: 'btn', onclick: close }, 'Cancel'),
+    h('button', { class: 'btn primary', onclick: async () => {
+      const body = { full_name: f.elements.full_name.value, role: f.elements.role.value };
+      if (f.elements.password.value) body.password = f.elements.password.value;
+      try {
+        if (u) { body.active = f.elements.active.checked; await api('PUT', `/api/users/${u.id}`, body); }
+        else { body.username = f.elements.username.value; await api('POST', '/api/users', body); }
+        close(); toast('User saved'); reload();
+      } catch (e) { err.replaceChildren(h('div', { class: 'msg err' }, e.message)); }
+    } }, 'Save'),
+  ]);
+}
+
+async function viewAudit() {
+  const rows = await api('GET', '/api/audit');
+  return [h('h1', {}, 'Activity log'), h('div', { class: 'table-wrap' }, h('table', {},
+    h('thead', {}, h('tr', {}, ['When (UTC)', 'User', 'Action', 'Module', 'Record'].map((t) => h('th', {}, t)))),
+    h('tbody', {}, rows.map((r) => h('tr', {}, h('td', {}, r.at), h('td', {}, r.username || ''), h('td', {}, r.action),
+      h('td', {}, r.resource), h('td', { class: 'num' }, r.record_id ?? ''))))))];
+}
+
+function viewAccount() {
+  const msg = h('div');
+  const f = h('form', { class: 'panel form' },
+    h('div', { class: 'full' }, h('label', {}, 'Current password'), h('input', { type: 'password', name: 'current', autocomplete: 'current-password' })),
+    h('div', {}, h('label', {}, 'New password (8+ characters)'), h('input', { type: 'password', name: 'next', autocomplete: 'new-password' })),
+    h('div', {}, h('label', {}, 'Repeat new password'), h('input', { type: 'password', name: 'again', autocomplete: 'new-password' })),
+    h('div', { class: 'full' }, h('button', { class: 'btn primary', type: 'submit' }, 'Change password')));
+  f.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (f.elements.next.value !== f.elements.again.value) { msg.replaceChildren(h('div', { class: 'msg err' }, 'The new passwords do not match')); return; }
+    try {
+      await api('POST', '/api/me/password', { current: f.elements.current.value, next: f.elements.next.value });
+      f.reset();
+      msg.replaceChildren(h('div', { class: 'msg ok' }, 'Password changed.'));
+    } catch (err) { msg.replaceChildren(h('div', { class: 'msg err' }, err.message)); }
+  });
+  return [h('h1', {}, 'My account'),
+    h('p', {}, `Signed in as ${state.user.username}`, h('span', { class: 'role' }, state.user.role)),
+    msg, f];
+}
+
+// ---------- shell and routing ------------------------------------------------
+
+function renderLogin(message) {
+  const err = h('div', {}, message ? h('div', { class: 'msg err' }, message) : null);
+  const f = h('form', { class: 'panel' },
+    h('h1', {}, h('img', { src: 'icon.svg', alt: '' }), 'Sheet Metal Manager'),
+    err,
+    h('div', { class: 'field' }, h('label', { for: 'u' }, 'Username'), h('input', { id: 'u', type: 'text', name: 'username', autocomplete: 'username', required: true })),
+    h('div', { class: 'field' }, h('label', { for: 'p' }, 'Password'), h('input', { id: 'p', type: 'password', name: 'password', autocomplete: 'current-password', required: true })),
+    h('button', { class: 'btn primary', type: 'submit' }, 'Sign in'));
+  f.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    try {
+      const r = await api('POST', '/api/login', { username: f.elements.username.value, password: f.elements.password.value });
+      state.user = r.user; state.rights = r.rights;
+      await start();
+    } catch (ex) { err.replaceChildren(h('div', { class: 'msg err' }, ex.message)); }
+  });
+  document.getElementById('app').replaceChildren(h('div', { class: 'login' }, f));
+  f.elements.username.focus();
+}
+
+function renderShell() {
+  const groups = {};
+  for (const [name, r] of Object.entries(state.meta.resources)) {
+    if (name === 'drawings') continue;
+    (groups[r.group] = groups[r.group] || []).push([`#/r/${name}`, r.label]);
+  }
+  groups.Engineering = [['#/drawings', 'Drawings'], ...(groups.Engineering || [])];
+  const nav = h('nav', { class: 'side', id: 'side' },
+    h('div', { class: 'brand' }, h('img', { src: 'icon.svg', alt: '' }), 'Sheet Metal Manager'),
+    h('a', { href: '#/' }, 'Dashboard'),
+    Object.entries(groups).map(([g, links]) => [h('h4', {}, g), links.map(([href, label]) => h('a', { href }, label))]),
+    state.user.role === 'admin' ? [h('h4', {}, 'Admin'), h('a', { href: '#/users' }, 'Users'), h('a', { href: '#/audit' }, 'Activity log')] : null,
+    h('h4', {}, 'Account'), h('a', { href: '#/account' }, 'My account'));
+  const top = h('div', { class: 'top' },
+    h('button', { class: 'btn menu-btn', onclick: () => nav.classList.toggle('open') }, '☰'),
+    h('span', { class: 'who' }, state.user.full_name || state.user.username, h('span', { class: 'role' }, state.user.role)),
+    h('span', {}, h('span', { class: 'muted' }, `v${state.version} `),
+      h('button', { class: 'btn', onclick: async () => { await api('POST', '/api/logout'); state.user = null; history.replaceState(null, '', '#/'); renderLogin(); } }, 'Sign out')));
+  document.getElementById('app').replaceChildren(h('div', { class: 'shell' }, nav, h('div', { class: 'main' }, top, h('div', { class: 'content', id: 'content' }))));
+}
+
+async function route() {
+  if (!state.user) return;
+  const hash = location.hash.replace(/^#\/?/, '');
+  const [a, b, c] = hash.split('/');
+  document.querySelectorAll('.side a').forEach((el) => el.classList.toggle('on', el.getAttribute('href') === `#/${a ? [a, b].filter(Boolean).join('/') : ''}`));
+  document.getElementById('side').classList.remove('open');
+  document.querySelectorAll('.overlay').forEach((o) => o.remove());
+  let view;
+  try {
+    if (!a) view = await viewDashboard();
+    else if (a === 'r') view = viewList(b);
+    else if (a === 'drawings') view = viewDrawings();
+    else if (a === 'project') view = await viewProject(Number(b));
+    else if (a === 'ncr' && c === 'print') view = await viewNcrPrint(Number(b));
+    else if (a === 'users') view = await viewUsers();
+    else if (a === 'audit') view = await viewAudit();
+    else if (a === 'account') view = viewAccount();
+    else view = [h('h1', {}, 'Page not found')];
+  } catch (e) {
+    view = [h('div', { class: 'msg err' }, e.message)];
+  }
+  content().replaceChildren(...[view].flat(Infinity).filter((v) => v !== null && v !== undefined && v !== false));
+  window.scrollTo(0, 0);
+}
+
+async function start() {
+  const [me, meta] = await Promise.all([api('GET', '/api/me'), api('GET', '/api/meta')]);
+  Object.assign(state, { user: me.user, rights: me.rights, version: me.version, meta });
+  renderShell();
+  await route();
+}
+
+window.addEventListener('hashchange', route);
+start().catch(() => { if (!state.user) renderLogin(); });
