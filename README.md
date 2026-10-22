@@ -16,7 +16,19 @@ else opens it in a browser.
 | Planner | View all; create and update projects, parts, routing and nesting; upload drawings; create workflow from routing; export. Cannot delete, and cannot change machines, tooling, plate stock, maintenance, NCR or workflow status |
 | Viewer | View, open/download drawings and export only |
 
+Each user also has a **process** (Designer, Planner, Engineer, Technician, Supervisor,
+Operator, Manager). Everyone can read everything (to share information), but a user with a
+process may only create and change the data that process owns (`OWNERS` in
+`server/lib/resources.js`), e.g. Technician: machines, plate stock, maintenance, inventory;
+Operator: own output; Manager: owns no shop data, approves Job Travellers. Daily log,
+issues and the stock log are open to everyone.
+
 Rules are enforced by the server (`server/lib/perm.js`), not only hidden in the screens.
+
+**Security**: text that looks like HTML or script is refused, uploads are checked by their
+content (PDF, STEP, DWG, DXF, PNG, JPG headers; programs and web pages are refused), SQL is
+always parameterised, 5 wrong passwords lock a username for 15 minutes, and pages are sent
+with a strict Content-Security-Policy. There is no feature that runs code from the website.
 
 ## Install on the department server
 
@@ -76,7 +88,8 @@ during a quiet period.
   maintenance availability, MTBF and MTTR for the last 30 days, plates at or below minimum.
 - **Projects**: open a project to plan parts (child parts shown under their parent),
   routing per part, laser nesting, drawings and NCRs.
-- **Drawings**: drag and drop pdf, dwg, idw, slddrw, ipt, iam, sldprt, sldasm or dxf.
+- **Drawings**: drag and drop pdf, dwg, dxf, idw, slddrw, STEP (.step/.stp), ipt, iam,
+  sldprt, sldasm, png or jpg, also from the Job Traveller page.
   The part number and revision are read from the file name (`606118901_PART_1 Rev C.pdf`);
   the older revision becomes Superseded. PDFs open in the browser; CAD files download.
 - **Maintenance**: preventive, breakdown and inspection work orders with downtime.
@@ -84,7 +97,18 @@ during a quiet period.
   signature boxes.
 - **Workflow**: "Create workflow" on a part builds the steps from its routing
   (Drawing review → Programming → operations → QC → Packing → Delivery).
+- **Find Job Traveller**: the search box at the top of every page. The Job Traveller page shows
+  where the item is now, each stage (Done / In progress / Pending with good and reject qty),
+  mother and child parts, drawings and STEP files, and issues.
+- **New project (parts)**: the Planner enters a mother part and its child parts (any depth,
+  qty per parent), and can create a Job Traveller with routing for every part in one go.
+- **Inventory** and **Stock log**: operator tools, maintenance spares and equipment with
+  location, minimum stock and a Low / Out alert on the dashboard. Every use, check-out,
+  return or receipt is logged by user, process, machine and maintenance work order.
+- **Colour theme**: Standard, Light, Dark, Soft green or High contrast, under My account.
+- **Excel templates**: Template / Import template / Export Excel on every list.
 - **Export CSV** on every list (opens in Excel).
+- **Publish** through Cloudflare Tunnel: see `deploy/cloudflare/README.md`.
 
 ## Development
 

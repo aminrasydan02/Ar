@@ -224,3 +224,7 @@ node_modules/
 /data/
 /config.json
 !server/lib/
+
+# Cloudflare Tunnel files with secrets
+deploy/cloudflare/config.yml
+*.cloudflared.json

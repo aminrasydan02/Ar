@@ -30,7 +30,7 @@ class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
 }
 
-function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Metal Department' }) {
+function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Metal Department', publicHosts = [] }) {
   fs.mkdirSync(drawingsDir, { recursive: true });
 
   function send(res, status, body, headers = {}) {
@@ -656,7 +656,8 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
       const host = req.headers.host;
       let originHost = '';
       try { originHost = new URL(req.headers.origin).host; } catch { /* invalid origin */ }
-      if (originHost !== host) throw new HttpError(403, 'Cross-site request refused');
+      // publicHosts: the website's own public address, e.g. behind a Cloudflare Tunnel.
+      if (originHost !== host && !publicHosts.includes(originHost)) throw new HttpError(403, 'Cross-site request refused');
     }
 
     const cookies = auth.parseCookies(req.headers.cookie);
