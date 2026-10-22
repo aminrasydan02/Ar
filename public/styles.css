@@ -503,3 +503,32 @@ tr.group td { background: var(--head); font-size: 13px; padding-top: 8px; paddin
 .nav-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .nav-chip.on { background: var(--side-strong); border-color: var(--side-strong); color: var(--side); font-weight: 700; }
 .nav-group[hidden], .side a[hidden] { display: none; }
+
+/* Project bubbles in the project slicer */
+.slicer.proj { flex-wrap: wrap; }
+.slicer.proj > .pinfo { flex-basis: 100%; }
+.pbubs { display: flex; flex-wrap: wrap; gap: 8px; min-width: 0; flex: 1; }
+.pdot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex: none; margin-right: 6px; vertical-align: middle; }
+.pbub { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; min-width: 0; text-align: left; cursor: pointer; font: inherit; color: var(--ink);
+  padding: 7px 10px 7px 12px; border-radius: 18px; border: 1px solid var(--line-2); border-left: 4px solid var(--pc);
+  background: color-mix(in srgb, var(--pc) 8%, transparent); }
+.pbub:hover { background: color-mix(in srgb, var(--pc) 16%, transparent); }
+.pbub:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+.pbub.on { border-color: var(--pc); box-shadow: 0 0 0 2px var(--pc) inset; background: color-mix(in srgb, var(--pc) 20%, var(--panel)); }
+.pbub-t { display: grid; min-width: 0; line-height: 1.25; }
+.pbub-t strong { font-size: 13px; }
+.pbub-name { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 220px; }
+.pbub-t small { color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 220px; }
+.pbub .n { margin-left: 8px; font-size: 11px; padding: 1px 7px; border-radius: 999px; background: var(--soft); color: var(--muted); font-variant-numeric: tabular-nums; }
+.pinfo { margin-top: 10px; border: 1px solid var(--line); border-left: 4px solid var(--pc); border-radius: 12px; padding: 10px 12px;
+  background: color-mix(in srgb, var(--pc) 7%, transparent); }
+.pinfo-h { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+.pinfo-h .grow { flex: 1; }
+.pinfo-g { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px 14px; }
+.pinfo-f small { display: block; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
+.pinfo-f strong { font-size: 13px; font-weight: 600; }
+tr.group .pdot { margin-right: 8px; }
+@media (max-width: 860px) { .pbub { width: 100%; } .pbub-name, .pbub-t small { max-width: none; white-space: normal; } }
+.pinfo { min-width: 0; max-width: 100%; box-sizing: border-box; }
+.pinfo-h strong { min-width: 0; overflow-wrap: anywhere; }
+@media (max-width: 860px) { .slicer.proj { align-items: stretch; flex-wrap: nowrap; } }

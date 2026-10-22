@@ -193,6 +193,41 @@ function slicerValue(field, r) {
   return v === null || v === undefined || v === '' ? '' : String(v);
 }
 
+// Project slicer: one coloured bubble per project with its name and key facts.
+let projCache = null;
+const PROJ_COLOURS = ['var(--ring-1)', 'var(--ring-2)', 'var(--ring-3)', 'var(--ring-4)', 'var(--link)', 'var(--ok)'];
+function projectOf(code) { return (projCache || []).find((p) => p.code === code); }
+function projectColour(code) {
+  const i = (projCache || []).map((p) => p.code).sort().indexOf(code);
+  return i < 0 ? 'var(--muted)' : PROJ_COLOURS[i % PROJ_COLOURS.length];
+}
+const dot = (colour) => { const d = h('span', { class: 'pdot', 'aria-hidden': 'true' }); d.style.background = colour; return d; };
+function projectBubble(code, n, on, onclick, noneText) {
+  const p = projectOf(code);
+  const b = h('button', { type: 'button', class: `pbub${on ? ' on' : ''}`, 'aria-pressed': String(on), onclick },
+    dot(code ? projectColour(code) : 'var(--muted)'),
+    h('span', { class: 'pbub-t' }, h('strong', {}, code || noneText), p ? h('span', { class: 'pbub-name' }, p.name) : null,
+      p ? h('small', {}, [p.customer, p.due_date ? `due ${fmtDate(p.due_date)}` : null, p.status].filter(Boolean).join(' · ')) : null),
+    h('span', { class: 'n' }, n));
+  b.style.setProperty('--pc', code ? projectColour(code) : 'var(--muted)');
+  return b;
+}
+function projectPanel(code, n) {
+  const p = projectOf(code);
+  if (!p) return null;
+  const left = p.due_date ? daysBetweenIso(localToday(), p.due_date) : null;
+  const fact = (l, v) => h('div', { class: 'pinfo-f' }, h('small', {}, l), h('strong', {}, v || '—'));
+  const panel = h('div', { class: 'pinfo' },
+    h('div', { class: 'pinfo-h' }, dot(projectColour(code)), h('strong', {}, `${p.code} · ${p.name}`), pill(p.status), h('span', { class: 'grow' }),
+      h('a', { class: 'btn small', href: `#/project/${p.id}` }, 'Open project')),
+    h('div', { class: 'pinfo-g' }, fact('Customer', p.customer), fact('Work order', p.work_order), fact('Start', fmtDate(p.start_date)),
+      fact('Due', p.due_date ? `${fmtDate(p.due_date)}${left !== null ? ` (${left >= 0 ? `${left} day(s) left` : `${-left} day(s) late`})` : ''}` : ''),
+      fact('Records here', fmtNum(n))));
+  panel.style.setProperty('--pc', projectColour(code));
+  return panel;
+}
+const daysBetweenIso = (a, b) => Math.round((Date.parse(`${b}T00:00:00Z`) - Date.parse(`${a}T00:00:00Z`)) / 86400000);
+
 function recordTable(resName, { filter = {}, extra = [], rowActions, columns, onRow, slicerSlot, noneLabel, onLoad } = {}) {
   const res = state.meta.resources[resName];
   const fields = res.fields.filter((f) => f.list !== false && (!columns || columns.includes(f.name)));
@@ -216,6 +251,14 @@ function recordTable(resName, { filter = {}, extra = [], rowActions, columns, on
       const chip = (v, label, n) => h('button', { type: 'button', class: `chip${picked[f.name] === v ? ' on' : ''}`, 'aria-pressed': String(picked[f.name] === v),
         onclick: () => { if (v === undefined || picked[f.name] === v) delete picked[f.name]; else picked[f.name] = v; draw(); } },
         label, h('span', { class: 'n' }, n));
+      if (f.name === 'project_id' && projCache) {
+        const toggle = (v) => () => { if (v === undefined || picked[f.name] === v) delete picked[f.name]; else picked[f.name] = v; draw(); };
+        return h('div', { class: 'slicer proj', role: 'group', 'aria-label': `Filter by ${f.label}` },
+          h('span', { class: 'slicer-l' }, f.label),
+          h('div', { class: 'pbubs' }, chip(undefined, 'All projects', base.length),
+            values.map((v) => projectBubble(v, counts.get(v), picked[f.name] === v, toggle(v), none(f)))),
+          picked[f.name] ? projectPanel(picked[f.name], counts.get(picked[f.name]) || 0) : null);
+      }
       return h('div', { class: 'slicer', role: 'group', 'aria-label': `Filter by ${f.label}` },
         h('span', { class: 'slicer-l' }, f.label),
         h('div', { class: 'chips' }, chip(undefined, 'All', base.length), values.map((v) => chip(v, v || none(f), counts.get(v)))));
@@ -238,7 +281,9 @@ function recordTable(resName, { filter = {}, extra = [], rowActions, columns, on
       const groups = new Map();
       for (const r of shown) { const v = slicerValue(g, r); if (!groups.has(v)) groups.set(v, []); groups.get(v).push(r); }
       const keys = [...groups.keys()].sort((a, b) => (a === '') - (b === '') || a.localeCompare(b, undefined, { numeric: true }));
-      body = keys.map((k) => [h('tr', { class: 'group' }, h('td', { colspan: span }, h('strong', {}, k || none(g)), h('span', { class: 'muted' }, ` · ${groups.get(k).length}`))),
+      const isProj = g.name === 'project_id' && projCache;
+      body = keys.map((k) => [h('tr', { class: 'group' }, h('td', { colspan: span }, isProj ? dot(k ? projectColour(k) : 'var(--muted)') : null, h('strong', {}, k || none(g)),
+        isProj && projectOf(k) ? h('span', {}, ` · ${projectOf(k).name}`) : null, h('span', { class: 'muted' }, ` · ${groups.get(k).length}`))),
         groups.get(k).map(line)]);
     } else body = shown.map(line);
     tableBox.replaceChildren(h('table', {},
@@ -248,7 +293,9 @@ function recordTable(resName, { filter = {}, extra = [], rowActions, columns, on
 
   async function load() {
     const qs = new URLSearchParams({ ...filter, ...(search.value ? { q: search.value } : {}) });
-    try { rows = await api('GET', `/api/${resName}?${qs}`); draw(); if (onLoad) onLoad(rows); }
+    try {
+      if (!projCache && slicers.some((f) => f.name === 'project_id')) projCache = await api('GET', '/api/projects').catch(() => null);
+      rows = await api('GET', `/api/${resName}?${qs}`); draw(); if (onLoad) onLoad(rows); }
     catch (e) { tableBox.replaceChildren(h('div', { class: 'msg err' }, e.message)); }
   }
   let timer;
@@ -1644,6 +1691,7 @@ async function route() {
   const [a, b, c] = hash.split('/');
   document.querySelectorAll('.side a').forEach((el) => el.classList.toggle('on', el.getAttribute('href') === `#/${a ? [a, b].filter(Boolean).join('/') : ''}`));
   document.getElementById('side').classList.remove('open');
+  projCache = null;
   document.querySelectorAll('.overlay').forEach((o) => o.remove());
   if (a !== 'layout') window.onbeforeunload = null;
   let view;
