@@ -1,0 +1,9 @@
+# HTTPS in front of the website. Caddy gets and renews the certificate by itself.
+# Replace smm.example.com with your domain; its DNS A record must point to this server.
+smm.example.com {
+	encode gzip
+	request_body {
+		max_size 60MB
+	}
+	reverse_proxy 127.0.0.1:8080
+}

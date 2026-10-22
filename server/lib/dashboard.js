@@ -31,7 +31,7 @@ function buildDashboard(db) {
       (SELECT COUNT(*) FROM parts x WHERE x.project_id = p.id) AS parts,
       (SELECT COUNT(*) FROM wf_steps w JOIN parts x ON x.id = w.part_id WHERE x.project_id = p.id) AS steps,
       (SELECT COUNT(*) FROM wf_steps w JOIN parts x ON x.id = w.part_id WHERE x.project_id = p.id AND w.status = 'Done') AS steps_done
-    FROM projects p WHERE p.status NOT IN ('Completed','Cancelled') ORDER BY p.due_date IS NULL, p.due_date`);
+    FROM projects p WHERE p.status NOT IN ('Completed','Cancelled') ORDER BY CASE WHEN p.due_date IS NULL THEN 1 ELSE 0 END, p.due_date`);
 
   const stepRows = all(`
     SELECT w.part_id, w.step, w.status, w.seq, x.part_no, p.code AS project
@@ -57,13 +57,13 @@ function buildDashboard(db) {
     LEFT JOIN routings r ON r.machine_id = m.id
     LEFT JOIN parts x ON x.id = r.part_id
     LEFT JOIN projects p ON p.id = x.project_id AND p.status NOT IN ('Completed','Cancelled')
-    GROUP BY m.id ORDER BY m.code`).map((m) => ({ ...m, load_days: Math.round((m.load_min / MINUTES_PER_DAY) * 100) / 100 }));
+    GROUP BY m.id, m.code, m.name, m.machine_type, m.status ORDER BY m.code`).map((m) => ({ ...m, load_days: Math.round((m.load_min / MINUTES_PER_DAY) * 100) / 100 }));
 
   const downtime = all(`
     SELECT m.code, COUNT(o.id) AS breakdowns, COALESCE(SUM(o.downtime_min),0) AS downtime_min
     FROM machines m LEFT JOIN maint_orders o ON o.machine_id = m.id AND o.kind = 'Breakdown'
       AND COALESCE(o.opened, substr(o.created_at,1,10)) >= date('now','-30 day')
-    GROUP BY m.id ORDER BY m.code`).map((d) => {
+    GROUP BY m.id, m.code ORDER BY m.code`).map((d) => {
     const available = 30 * MINUTES_PER_DAY;
     const uptime = Math.max(available - d.downtime_min, 0);
     return {
@@ -81,7 +81,7 @@ function buildDashboard(db) {
       COUNT(pl.id) AS sizes, COALESCE(SUM(pl.qty), 0) AS sheets, SUM(CASE WHEN pl.qty <= pl.min_qty THEN 1 ELSE 0 END) AS low,
       group_concat(DISTINCT pl.material) AS materials
     FROM plates pl LEFT JOIN projects p ON p.id = pl.project_id
-    GROUP BY pl.project_id ORDER BY pl.project_id IS NULL, p.code`);
+    GROUP BY pl.project_id, p.code, p.name ORDER BY CASE WHEN pl.project_id IS NULL THEN 1 ELSE 0 END, p.code`);
   const lowItems = all(`SELECT id, code, name, item_group, location, qty_on_hand, min_qty, unit, status FROM inventory_items
     WHERE status IN ('Low', 'Out') ORDER BY status DESC, code`);
   // Work still open per shop process, from Job Traveller routing and Operator output.
@@ -99,7 +99,7 @@ function buildDashboard(db) {
                FROM operator_outputs GROUP BY job_traveller_id, process_id) o
       ON o.job_traveller_id = s.job_traveller_id AND o.process_id = s.process_id
     WHERE COALESCE(p.active, 'Yes') != 'No'
-    GROUP BY p.id ORDER BY p.seq, p.name`).map((p) => ({
+    GROUP BY p.id, p.name, p.seq ORDER BY p.seq, p.name`).map((p) => ({
     ...p,
     balance: Math.max(p.target - p.good, 0),
     completion: p.target ? Math.round((p.good / p.target) * 1000) / 10 : 0,
@@ -126,11 +126,11 @@ function buildDashboard(db) {
     JOIN shop_processes p ON p.id = s.process_id
     LEFT JOIN (SELECT job_traveller_id, process_id, SUM(good_qty) AS good, SUM(reject_qty) AS reject FROM operator_outputs GROUP BY job_traveller_id, process_id) o
       ON o.job_traveller_id = s.job_traveller_id AND o.process_id = s.process_id
-    WHERE j.project_id IS NOT NULL GROUP BY j.project_id, p.id ORDER BY p.seq`);
+    WHERE j.project_id IS NOT NULL GROUP BY j.project_id, p.id, p.name, p.seq ORDER BY p.seq`);
   const jtCounts = all(`SELECT project_id, status, COUNT(*) AS n FROM job_travellers WHERE project_id IS NOT NULL GROUP BY project_id, status`);
   const pct = (g, t) => (t ? Math.round((g / t) * 1000) / 10 : 0);
   const projectProgress = all(`SELECT id, code, name, customer, start_date, due_date, status FROM projects
-    WHERE status NOT IN ('Cancelled') ORDER BY status = 'Completed', due_date IS NULL, due_date`).map((p) => {
+    WHERE status NOT IN ('Cancelled') ORDER BY CASE WHEN status = 'Completed' THEN 1 ELSE 0 END, CASE WHEN due_date IS NULL THEN 1 ELSE 0 END, due_date`).map((p) => {
     const procs = perProc.filter((x) => x.project_id === p.id).map((x) => ({ name: x.name, target: x.target, good: x.good, completion: pct(x.good, x.target) }));
     const target = procs.reduce((n, x) => n + x.target, 0), good = procs.reduce((n, x) => n + x.good, 0);
     const jts = Object.fromEntries(jtCounts.filter((c) => c.project_id === p.id).map((c) => [c.status, c.n]));

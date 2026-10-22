@@ -746,6 +746,54 @@ async function viewWorktime() {
     h('div', { class: 'toolbar gap-top' }, h('span', { class: 'grow' }), h('button', { class: 'btn', onclick: reload }, 'Apply changes to this session'))];
 }
 
+// ---------- Admin: database & backup ---------------------------------------------
+
+const fmtSize = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
+
+async function viewDatabase() {
+  const d = await api('GET', '/api/database');
+  const head = pageHead('Database & backup', 'db', `${d.name} · schema version ${d.schema_version}. Download a full backup or a SQL script for another database, and see the scheduled backups.`);
+  const stat = (ic, v, l, tone) => h('div', { class: `stat ${tone}` }, h('span', { class: 'stat-i' }, icon(ic)), h('div', {}, h('div', { class: 'stat-n' }, v), h('div', { class: 'stat-l' }, l)));
+  const rows = d.counts.reduce((n, c) => n + c.rows, 0);
+  const sched = d.schedule;
+  const busy = (btn, job) => async () => {
+    btn.disabled = true;
+    try { await job(); route(); } catch (e) { toast(e.message, true); btn.disabled = false; }
+  };
+  const backupBtn = h('button', { class: 'btn primary' }, 'Backup now');
+  backupBtn.onclick = busy(backupBtn, async () => { const r = await api('POST', '/api/database/backup'); toast(`Backup ${r.file} saved${r.uploaded ? ' and uploaded' : ''}`); });
+  const bqBtn = h('button', { class: 'btn', disabled: !d.bigquery, title: d.bigquery ? '' : 'Set BIGQUERY_PROJECT and a service account key on the server' }, 'Export to BigQuery');
+  bqBtn.onclick = busy(bqBtn, async () => { const r = await api('POST', '/api/database/bigquery'); toast(`${Object.keys(r.tables).length} tables sent to BigQuery`); });
+  const card = (ic, title, ...body) => h('section', { class: 'dcard' }, h('div', { class: 'dcard-h' }, h('span', { class: 'dcard-i' }, icon(ic)), h('h2', {}, title)), ...body);
+  const lastLine = (x, what) => (x ? `${what}: ${x.at.slice(0, 16).replace('T', ' ')} UTC` : `${what}: not run since the server started`);
+  return [head,
+    h('div', { class: 'stat-grid' },
+      stat('db', d.name, 'Database in use', 't1'),
+      stat('list', fmtNum(rows), `Rows in ${d.counts.length} tables`, 't2'),
+      stat('clock', sched.backup_hours ? `Every ${sched.backup_hours} h` : 'Off', 'Automatic backup', 't3'),
+      stat('folder', d.storage || 'Data folder only', 'Backup storage', 't4')),
+    h('div', { class: 'dgrid' },
+      card('file', 'Download',
+        h('p', { class: 'muted small' }, 'Full backup: every table, compressed, with row counts and a checksum. Load it with "import-backup" on any database.'),
+        h('div', { class: 'toolbar' }, h('a', { class: 'btn primary', href: '/api/database/backup.json.gz' }, 'Backup file (.json.gz)')),
+        h('p', { class: 'muted small' }, 'SQL script: builds the tables and adds every row, for the chosen database.'),
+        h('div', { class: 'chips' }, d.sql_targets.map((t) => h('a', { class: 'chip', href: `/api/database/export.sql?dialect=${t.id}` }, t.name)))),
+      card('clock', 'Backup and reporting',
+        h('p', { class: 'muted small' }, `Keeps every backup for ${sched.keep_days} days, then one a month for ${sched.keep_months ? `${sched.keep_months} months` : 'ever'}.`),
+        h('p', { class: 'muted small' }, lastLine(d.last.backup, 'Last backup')),
+        h('p', { class: 'muted small' }, d.bigquery ? `BigQuery: ${d.bigquery}${sched.bigquery_hours ? `, every ${sched.bigquery_hours} h` : ', on request'}. ${lastLine(d.last.bigquery, 'Last export')}` : 'BigQuery is not set up.'),
+        h('div', { class: 'toolbar' }, backupBtn, bqBtn))),
+    h('h2', {}, 'Rows per table'),
+    h('div', { class: 'table-wrap' }, h('table', {},
+      h('thead', {}, h('tr', {}, h('th', {}, 'Table'), h('th', { class: 'num' }, 'Rows'))),
+      h('tbody', {}, d.counts.map((c) => h('tr', {}, h('td', {}, (state.meta.resources[c.table] || {}).label || c.table), h('td', { class: 'num' }, fmtNum(c.rows))))))),
+    h('h2', {}, 'Saved backups'),
+    d.backups.length ? h('div', { class: 'table-wrap' }, h('table', {},
+      h('thead', {}, h('tr', {}, ['File', 'Where', 'Size'].map((t) => h('th', {}, t)))),
+      h('tbody', {}, d.backups.map((b) => (b.error ? h('tr', {}, h('td', { colspan: 3, class: 'wrap' }, `Storage could not be read: ${b.error}`))
+        : h('tr', {}, h('td', {}, b.file), h('td', {}, b.where), h('td', { class: 'num' }, fmtSize(b.size)))))))) : h('div', { class: 'empty panel' }, 'No backups yet. Click Backup now, or wait for the automatic one.')];
+}
+
 // ---------- Hourly output (plan from the roster vs actual) ------------------------
 
 const achieveTone = (p) => (p === null || p === undefined ? '' : p >= 95 ? 'ok' : p >= 80 ? 'warn' : 'bad');
@@ -1000,6 +1048,7 @@ const ICONS = {
   pulse: 'M3 12h4l3-7 4 14 3-7h4',
   gantt: 'M4 3v18h17 M7 7h7 M10 11h8 M8 15h6',
   board: 'M4 4h4v16H4z M10 4h4v10h-4z M16 4h4v6h-4z',
+  db: 'M4 6c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3z M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6 M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3',
 };
 // The icon shown beside each page title.
 const PAGE_ICONS = {
@@ -1007,7 +1056,7 @@ const PAGE_ICONS = {
   plates: 'layers', drawings: 'draw', maint_orders: 'wrench', pm_tasks: 'clip', pm_logs: 'cal', pm: 'clip', schedules: 'gantt', plan: 'gantt', worktime: 'clock', shifts: 'clock', holidays: 'cal', hourly: 'clock', actual: 'pulse', shift_plans: 'users', roster: 'users', ncrs: 'alert', reason_codes: 'tag', job_travellers: 'jt', jt_steps: 'jt',
   operator_outputs: 'form', daily_logs: 'cal', inventory_items: 'box', inventory_moves: 'list', issues: 'chat', shop_processes: 'pulse',
   '': 'grid', daily: 'board', issue: 'chat', jt: 'jt', operator: 'form', find: 'search', layout: 'layout', 'project-new': 'plus', project: 'folder',
-  ncr: 'alert', users: 'users', audit: 'clock', rights: 'shield', account: 'user', nesting: 'nest',
+  ncr: 'alert', users: 'users', audit: 'clock', rights: 'shield', database: 'db', account: 'user', nesting: 'nest',
 };
 // Page title card: icon, title, a short line, and room for the slicer chips.
 function pageHead(title, iconName, sub, ...extra) {
@@ -2324,7 +2373,7 @@ function renderShell() {
   if (right('projects', 'create')) groups.Planning = [['#/project-new', 'New project (parts)'], ...groups.Planning];
   delete groups['Daily work'];
   const sections = Object.entries({ 'Daily work': daily, ...groups });
-  if (state.user.role === 'admin') sections.push(['Admin', [['#/users', 'Users'], ['#/rights', 'Access rights'], ['#/worktime', 'Working time'], ['#/audit', 'Activity log']]]);
+  if (state.user.role === 'admin') sections.push(['Admin', [['#/users', 'Users'], ['#/rights', 'Access rights'], ['#/worktime', 'Working time'], ['#/database', 'Database & backup'], ['#/audit', 'Activity log']]]);
   sections.push(['Account', [['#/account', 'My account']]]);
   // Menu slicer: chips that show one menu group at a time, plus a quick filter by page name.
   let pick = 'All';
@@ -2385,6 +2434,7 @@ async function route() {
     else if (a === 'pm') view = await viewPm();
     else if (a === 'plan') view = await viewPlan();
     else if (a === 'worktime') view = await viewWorktime();
+    else if (a === 'database') view = await viewDatabase();
     else if (a === 'hourly') view = await viewHourly();
     else if (a === 'actual') view = await viewActual();
     else if (a === 'roster') view = await viewRoster();

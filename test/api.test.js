@@ -6,6 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
 const db = require('../server/lib/db');
+const dbx = require('../server/lib/dbx');
 const { createApp } = require('../server/lib/app');
 const { seedDemo } = require('../server/seed');
 
@@ -13,10 +14,13 @@ let server, base, tmp, database;
 
 before(async () => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'smm-'));
-  database = db.open(path.join(tmp, 'smm.sqlite'));
+  // TEST_DATABASE_URL runs the same tests on another database (its app tables are emptied first).
+  const target = process.env.TEST_DATABASE_URL || path.join(tmp, 'smm.sqlite');
+  if (process.env.TEST_DATABASE_URL) { const c = dbx.connect(target); dbx.dropTables(c, db.schema().map((t) => t.name)); c.close(); }
+  database = db.open(target);
   db.ensureAdmin(database, 'adminpass1');
   seedDemo(database);
-  server = http.createServer(createApp({ db: database, drawingsDir: path.join(tmp, 'drawings') }));
+  server = http.createServer(createApp({ db: database, drawingsDir: path.join(tmp, 'drawings'), dataDir: tmp }));
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${server.address().port}`;
 });
@@ -671,4 +675,23 @@ test('Admin sets working time; hourly output from the operator roster; actual ou
   assert.equal(x.status, 200);
   assert.match(x.headers.get('content-type'), /spreadsheetml/);
   assert.equal((await call(admin, 'GET', '/api/reports/hourly.csv?date=2026-10-29')).status, 200);
+});
+
+test('Admin database page: counts, backup download, SQL script per database, backup now; others are refused', async () => {
+  assert.equal((await call(planner, 'GET', '/api/database')).status, 403);
+  const info = await call(admin, 'GET', '/api/database');
+  assert.equal(info.status, 200);
+  assert.ok(info.data.counts.find((c) => c.table === 'projects').rows > 0);
+  assert.deepEqual(info.data.sql_targets.map((t) => t.id), ['postgres', 'mysql', 'mssql', 'oracle', 'sqlite']);
+  const file = await fetch(`${base}/api/database/backup.json.gz`, { headers: { cookie: admin } });
+  assert.equal(file.headers.get('content-type'), 'application/gzip');
+  const b = require('../server/lib/dbx/transfer').readBackup(Buffer.from(await file.arrayBuffer()));
+  assert.equal(b.counts.projects, info.data.counts.find((c) => c.table === 'projects').rows);
+  const sql = await call(admin, 'GET', '/api/database/export.sql?dialect=mssql');
+  assert.match(sql.data, /SET IDENTITY_INSERT/);
+  assert.equal((await call(admin, 'GET', '/api/database/export.sql?dialect=nosuch')).status, 400);
+  const now = await call(admin, 'POST', '/api/database/backup');
+  assert.equal(now.status, 201);
+  assert.ok((await call(admin, 'GET', '/api/database')).data.backups.some((x) => x.file === now.data.file));
+  assert.equal((await call(admin, 'POST', '/api/database/bigquery')).status, 400);
 });

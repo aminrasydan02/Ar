@@ -14,6 +14,7 @@ const templates = require('./templates');
 const { writeXlsx } = require('./xlsx');
 
 const VERSION = require('../../package.json').version;
+const { createDatabaseAdmin } = require('./admindb');
 const PUBLIC_DIR = path.join(__dirname, '..', '..', 'public');
 const MAX_JSON = 1024 * 1024;
 const MAX_UPLOAD = 100 * 1024 * 1024;
@@ -33,7 +34,7 @@ class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
 }
 
-function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Metal Department', publicHosts = [] }) {
+function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Metal Department', publicHosts = [], dataDir, store = null, bigQuery = null }) {
   fs.mkdirSync(drawingsDir, { recursive: true });
   const loadRights = () => setProcessRights(db.prepare('SELECT process, resource FROM process_rights').all());
   loadRights();
@@ -46,6 +47,9 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
       WHERE t.checked_on IS NOT NULL AND t.status IN ('Pass','Fail','N/A')
         AND NOT EXISTS (SELECT 1 FROM pm_logs l WHERE l.pm_task_id = t.id AND l.date = t.checked_on);
     UPDATE tooling SET machine_type = (SELECT machine_type FROM machines m WHERE m.id = tooling.machine_id) WHERE machine_type IS NULL AND machine_id IS NOT NULL;`);
+
+  const handleDatabase = (...a) => databaseAdmin(...a);
+  let databaseAdmin = null;
 
   function send(res, status, body, headers = {}) {
     const isBuf = Buffer.isBuffer(body);
@@ -82,6 +86,8 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
   }
 
   // before / after: the record as JSON, so every change can be traced (who, when, what).
+  databaseAdmin = createDatabaseAdmin({ db, dataDir: dataDir || path.dirname(drawingsDir), drawingsDir, store, bigQuery, version: VERSION, audit: (...a) => audit(...a), HttpError, send });
+
   function audit(user, action, resource, id, before, after) {
     const js = (v) => (v === undefined || v === null ? null : JSON.stringify(v));
     db.prepare('INSERT INTO audit (username, action, resource, record_id, before, after) VALUES (?, ?, ?, ?, ?, ?)')
@@ -399,7 +405,7 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
       JOIN shop_processes p ON p.id = s.process_id
       LEFT JOIN (SELECT job_traveller_id, process_id, SUM(good_qty) AS good FROM operator_outputs GROUP BY job_traveller_id, process_id) o
         ON o.job_traveller_id = s.job_traveller_id AND o.process_id = s.process_id
-      GROUP BY p.id ORDER BY p.seq`).all(projectId);
+      GROUP BY p.id, p.code, p.name, p.seq ORDER BY p.seq`).all(projectId);
     if (!rows.length) throw new HttpError(400, 'This project has no Job Traveller routing to plan from');
     db.exec('BEGIN');
     try {
@@ -610,7 +616,7 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
         COALESCE(SUM(o.good_qty), 0) AS good, COALESCE(SUM(o.reject_qty), 0) AS reject, COALESCE(SUM(o.run_min), 0) AS run_min
       FROM jt_steps s JOIN shop_processes p ON p.id = s.process_id
       LEFT JOIN operator_outputs o ON o.job_traveller_id = s.job_traveller_id AND o.process_id = s.process_id
-      WHERE s.job_traveller_id = ? GROUP BY s.id ORDER BY COALESCE(s.seq, p.seq), p.seq`).all(id);
+      WHERE s.job_traveller_id = ? GROUP BY s.id, s.seq, s.cycle_min, s.target_qty, s.details, p.id, p.name, p.unit, p.seq ORDER BY COALESCE(s.seq, p.seq), p.seq`).all(id);
   }
 
   // Everything about one Job Traveller: where it is now, each stage, parts, files, issues.
@@ -641,7 +647,7 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
     const lastRun = db.prepare(`SELECT o.date, j.id AS jt_id, j.jt_no, j.part_no FROM operator_outputs o JOIN job_travellers j ON j.id = o.job_traveller_id
       WHERE o.machine IN (?, ?) ORDER BY o.date DESC, o.id DESC LIMIT 1`);
     for (const m of machines) m.last = lastRun.get(m.code, m.name) || null;
-    const locations = db.prepare(`SELECT location, COUNT(*) AS items, SUM(status IN ('Low','Out')) AS low
+    const locations = db.prepare(`SELECT location, COUNT(*) AS items, SUM(CASE WHEN status IN ('Low','Out') THEN 1 ELSE 0 END) AS low
       FROM inventory_items WHERE COALESCE(location, '') != '' GROUP BY location ORDER BY location`).all();
     return { machines, locations };
   }
@@ -1004,6 +1010,7 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
       throw new HttpError(404, 'Not found');
     }
     if (parts[0] === 'rights') return handleRights(req, res, method, user);
+    if (parts[0] === 'database') return handleDatabase(req, res, method, parts, user);
     if (parts[0] === 'users') return handleUsers(req, res, method, parts[1] ? Number(parts[1]) : null, user);
     if (parts[0] === 'audit' && method === 'GET') {
       if (user.role !== 'admin') throw new HttpError(403, 'Only Admin can view the audit log');

@@ -69,6 +69,17 @@ Everything lives in the `data` folder: `smm.sqlite` (database) and `drawings/` (
 files). Back up the whole folder. For a consistent copy, stop the server first or copy
 during a quiet period.
 
+Automatic backups (every 24 hours, kept 30 days then monthly) go to `data/backups/` and,
+when set up, to Cloudflare R2 or Amazon S3. Admin > Database & backup downloads a full
+backup or a SQL script for another database.
+
+## Other databases, export and publishing
+
+SQLite is the default. PostgreSQL, MySQL/MariaDB, SQL Server, Oracle, Cloudflare D1 and
+Turso are chosen with `DATABASE_URL`. Moving data, backups to R2/S3, Google BigQuery,
+Docker / cloud server set-up, Cloudflare Tunnel and every table and field are in
+[docs/PANDUAN-DATABASE.md](docs/PANDUAN-DATABASE.md) (Malay).
+
 ## Modules
 
 - **Job Traveller**: one per part order (`JT-YYYY-0001`), with its process routing (Seq,

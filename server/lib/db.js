@@ -1,80 +1,142 @@
 'use strict';
-const fs = require('node:fs');
-const path = require('node:path');
-const { DatabaseSync } = require('node:sqlite');
-const { resources, columnType } = require('./resources');
+const { resources } = require('./resources');
 const { hashPassword } = require('./auth');
+const dbx = require('./dbx');
+const { TYPES, NOW_DEFAULT, QUOTE, RESERVED } = require('./dbx/dialects');
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
-function open(file) {
-  if (file !== ':memory:') fs.mkdirSync(path.dirname(file), { recursive: true });
-  const db = new DatabaseSync(file);
-  db.exec('PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;');
+// Opens the database named by a file path or a DATABASE_URL (see dbx/index.js) and brings its tables up to date.
+function open(target, options) {
+  const db = dbx.connect(target, options);
+  db.useSchema(schema());
   migrate(db);
   return db;
 }
 
-function migrate(db) {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
-    CREATE TABLE IF NOT EXISTS users (
-      id INTEGER PRIMARY KEY,
-      username TEXT NOT NULL UNIQUE COLLATE NOCASE,
-      full_name TEXT,
-      role TEXT NOT NULL CHECK (role IN ('admin','planner','viewer')),
-      password_hash TEXT NOT NULL,
-      active INTEGER NOT NULL DEFAULT 1,
-      created_at TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-    CREATE TABLE IF NOT EXISTS sessions (
-      token TEXT PRIMARY KEY,
-      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      expires TEXT NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS audit (
-      id INTEGER PRIMARY KEY,
-      at TEXT NOT NULL DEFAULT (datetime('now')),
-      username TEXT, action TEXT, resource TEXT, record_id INTEGER
-    );
-  `);
-
+// Every table, in database-neutral types: id, int, real, key (short, indexed text), text, long.
+const now = 'now';
+function schema() {
+  const tables = [
+    { name: 'meta', cols: [{ name: 'key', type: 'key', pk: true }, { name: 'value', type: 'text' }] },
+    { name: 'users', cols: [
+      { name: 'id', type: 'id' },
+      { name: 'username', type: 'key', notNull: true, unique: true, nocase: true },
+      { name: 'full_name', type: 'text' },
+      { name: 'role', type: 'key', notNull: true, check: "role IN ('admin','planner','viewer')" },
+      { name: 'password_hash', type: 'text', notNull: true },
+      { name: 'active', type: 'int', notNull: true, default: 1 },
+      { name: 'created_at', type: 'key', notNull: true, default: now },
+      { name: 'process', type: 'text' }, { name: 'theme', type: 'text' },
+      // Appointed by Admin: may change any data. Extra processes: edit rights of other processes too.
+      { name: 'full_edit', type: 'int', notNull: true, default: 0 },
+      { name: 'extra_processes', type: 'text' }] },
+    { name: 'sessions', cols: [{ name: 'token', type: 'key', pk: true }, { name: 'user_id', type: 'int', notNull: true, ref: 'users', onDelete: 'CASCADE' }, { name: 'expires', type: 'key', notNull: true }] },
+    { name: 'audit', cols: [{ name: 'id', type: 'id' }, { name: 'at', type: 'key', notNull: true, default: now }, { name: 'username', type: 'text' }, { name: 'action', type: 'text' },
+      { name: 'resource', type: 'text' }, { name: 'record_id', type: 'int' }, { name: 'before', type: 'long' }, { name: 'after', type: 'long' }] },
+  ];
   for (const [name, res] of Object.entries(resources)) {
-    const cols = res.fields.map((f) => {
-      let col = `${f.name} ${columnType(f)}`;
-      if (f.type === 'ref') col += ` REFERENCES ${f.ref}(id) ON DELETE ${f.required ? 'CASCADE' : 'SET NULL'}`;
-      return col;
-    });
-    db.exec(`CREATE TABLE IF NOT EXISTS ${name} (
-      id INTEGER PRIMARY KEY,
-      ${cols.join(',\n      ')},
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-    )`);
+    tables.push({ name, cols: [
+      { name: 'id', type: 'id' },
+      ...res.fields.map((f) => ({
+        name: f.name,
+        type: f.type === 'ref' ? 'int' : f.type === 'number' ? 'real' : f.unique ? 'key' : ['textarea', 'json'].includes(f.type) ? 'long' : 'text',
+        ...(f.type === 'ref' ? { ref: f.ref, onDelete: f.required ? 'CASCADE' : 'SET NULL' } : {}),
+      })),
+      { name: 'created_at', type: 'key', notNull: true, default: now },
+      { name: 'updated_at', type: 'key', notNull: true, default: now }],
+    indexes: [
+      ...res.fields.filter((f) => f.unique).map((f) => ({ name: `ux_${name}_${f.name}`, cols: [f.name], unique: true })),
+      ...res.fields.filter((f) => f.type === 'ref').map((f) => ({ name: `ix_${name}_${f.name}`, cols: [f.name] }))] });
+  }
+  // Which process may change which module. Admin changes it on the Access rights page.
+  tables.push({ name: 'process_rights', cols: [{ name: 'process', type: 'key', notNull: true }, { name: 'resource', type: 'key', notNull: true }], pk: ['process', 'resource'] });
+  tables.push({ name: 'issue_replies', cols: [{ name: 'id', type: 'id' }, { name: 'issue_id', type: 'int', notNull: true, ref: 'issues', onDelete: 'CASCADE' },
+    { name: 'at', type: 'key', notNull: true, default: now }, { name: 'username', type: 'text' }, { name: 'process', type: 'text' }, { name: 'message', type: 'long', notNull: true }],
+  indexes: [{ name: 'ix_issue_replies_issue', cols: ['issue_id'] }] });
+  // Shop-floor layout: every save is a new version, so older layouts can be viewed or restored.
+  tables.push({ name: 'floor_layouts', cols: [{ name: 'id', type: 'id' }, { name: 'version', type: 'int', notNull: true, unique: true }, { name: 'data', type: 'long', notNull: true },
+    { name: 'note', type: 'text' }, { name: 'saved_by', type: 'text' }, { name: 'created_at', type: 'key', notNull: true, default: now }] });
+  return tables;
+}
+
+// Column definition in the database's own words.
+function columnSql(d, c, inline) {
+  const q = (w) => (d !== 'sqlite' && RESERVED[d] && RESERVED[d].includes(w) ? QUOTE[d](w) : w);
+  if (c.type === 'id') return `${q(c.name)} ${TYPES[d].id}`;
+  let sql = `${q(c.name)} ${TYPES[d][c.type]}`;
+  if (c.nocase && d === 'sqlite') sql += ' COLLATE NOCASE';
+  if (c.default !== undefined) sql += ` DEFAULT ${c.default === now ? NOW_DEFAULT[d] : c.default}`;
+  if (c.notNull || c.pk) sql += ' NOT NULL';
+  if (c.unique && inline) sql += ' UNIQUE';
+  if (c.pk && inline) sql += ' PRIMARY KEY';
+  if (c.check) sql += ` CHECK (${c.check})`;
+  if (c.ref && d === 'sqlite') sql += ` REFERENCES ${c.ref}(id) ON DELETE ${c.onDelete}`;
+  return sql;
+}
+
+// CREATE statements for a new, empty database of the given type (used by the SQL export).
+function createScript(d) {
+  const q = (w) => (d !== 'sqlite' && RESERVED[d].includes(w) ? QUOTE[d](w) : w);
+  const out = [];
+  const tables = schema();
+  for (const t of tables) {
+    const cols = t.cols.map((c) => columnSql(d, c, true));
+    if (t.pk) cols.push(`PRIMARY KEY (${t.pk.map(q).join(', ')})`);
+    out.push(`CREATE TABLE ${q(t.name)} (\n  ${cols.join(',\n  ')}\n)`);
+  }
+  for (const t of tables) out.push(...(t.indexes || []).map((ix) => indexSql(d, t, ix)));
+  if (d !== 'sqlite') for (const t of tables) out.push(...t.cols.filter((c) => c.ref).map((c) => foreignKeySql(d, t, c)));
+  return out;
+}
+function indexSql(d, t, ix) {
+  const q = (w) => (d !== 'sqlite' && RESERVED[d].includes(w) ? QUOTE[d](w) : w);
+  // SQL Server allows only one empty value in a unique index unless empty values are left out.
+  const where = d === 'mssql' && ix.unique ? ` WHERE ${ix.cols.map((c) => `${q(c)} IS NOT NULL`).join(' AND ')}` : '';
+  return `CREATE ${ix.unique ? 'UNIQUE ' : ''}INDEX ${ix.name} ON ${q(t.name)} (${ix.cols.map(q).join(', ')})${where}`;
+}
+function foreignKeySql(d, t, c) {
+  const q = (w) => (RESERVED[d].includes(w) ? QUOTE[d](w) : w);
+  // SQL Server refuses chains of cascading deletes; the adapter removes linked rows itself there.
+  const onDelete = d === 'mssql' ? '' : ` ON DELETE ${c.onDelete}`;
+  return `ALTER TABLE ${q(t.name)} ADD CONSTRAINT fk_${t.name}_${c.name} FOREIGN KEY (${q(c.name)}) REFERENCES ${q(c.ref)} (id)${onDelete}`;
+}
+
+function migrate(db) {
+  const d = db.dialect === 'd1' || db.dialect === 'libsql' ? 'sqlite' : db.dialect;
+  const q = (w) => (d !== 'sqlite' && RESERVED[d].includes(w) ? QUOTE[d](w) : w);
+  const tables = schema();
+  // Table definitions are already written for this database, so they skip SQL translation.
+  const ddl = (sql) => (db.raw ? db.raw(sql) : db.exec(sql));
+  // Tables first (links are added afterwards on servers, because a table may link to one made later).
+  for (const t of tables) {
+    const have = new Set(db.columns(t.name));
+    if (!have.size) {
+      const cols = t.cols.map((c) => columnSql(d, c, true));
+      if (t.pk) cols.push(`PRIMARY KEY (${t.pk.map(q).join(', ')})`);
+      ddl(`CREATE TABLE ${d === 'sqlite' ? 'IF NOT EXISTS ' : ''}${q(t.name)} (\n  ${cols.join(',\n  ')}\n)`);
+      continue;
+    }
     // Columns added to a module after its table was first created.
-    const existing = new Set(db.prepare(`PRAGMA table_info(${name})`).all().map((c) => c.name));
-    for (const f of res.fields) {
-      if (!existing.has(f.name)) db.exec(`ALTER TABLE ${name} ADD COLUMN ${f.name} ${columnType(f)}`);
-    }
-    for (const f of res.fields.filter((x) => x.unique)) {
-      db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS ux_${name}_${f.name} ON ${name}(${f.name})`);
-    }
-    for (const f of res.fields.filter((x) => x.type === 'ref')) {
-      db.exec(`CREATE INDEX IF NOT EXISTS ix_${name}_${f.name} ON ${name}(${f.name})`);
+    for (const c of t.cols.filter((x) => !have.has(x.name))) {
+      const col = columnSql(d, { ...c, unique: false }, false);
+      ddl(d === 'mssql' ? `ALTER TABLE ${q(t.name)} ADD ${col}` : d === 'oracle' ? `ALTER TABLE ${q(t.name)} ADD (${col})` : `ALTER TABLE ${q(t.name)} ADD COLUMN ${col}`);
     }
   }
-  // Version 2: each user has a job process, and issues have a discussion thread.
-  const userCols = new Set(db.prepare('PRAGMA table_info(users)').all().map((c) => c.name));
-  if (!userCols.has('process')) db.exec('ALTER TABLE users ADD COLUMN process TEXT');
-  if (!userCols.has('theme')) db.exec('ALTER TABLE users ADD COLUMN theme TEXT'); // colour theme chosen by the user
-  // Appointed by Admin: may change any data. Extra processes: edit rights of other processes too.
-  if (!userCols.has('full_edit')) db.exec('ALTER TABLE users ADD COLUMN full_edit INTEGER NOT NULL DEFAULT 0');
-  if (!userCols.has('extra_processes')) db.exec('ALTER TABLE users ADD COLUMN extra_processes TEXT');
-  const auditCols = new Set(db.prepare('PRAGMA table_info(audit)').all().map((c) => c.name));
-  if (!auditCols.has('before')) db.exec('ALTER TABLE audit ADD COLUMN before TEXT');
-  if (!auditCols.has('after')) db.exec('ALTER TABLE audit ADD COLUMN after TEXT');
-  // Which process may change which module. Admin changes it on the Access rights page.
-  db.exec('CREATE TABLE IF NOT EXISTS process_rights (process TEXT NOT NULL, resource TEXT NOT NULL, PRIMARY KEY (process, resource))');
+  const indexes = db.indexNames();
+  for (const t of tables) {
+    for (const ix of t.indexes || []) {
+      if (!indexes.has(ix.name)) ddl(indexSql(d, t, ix));
+    }
+  }
+  if (d !== 'sqlite') {
+    const fks = db.constraintNames();
+    for (const t of tables) {
+      for (const c of t.cols.filter((x) => x.ref)) {
+        if (!fks.has(`fk_${t.name}_${c.name}`)) ddl(foreignKeySql(d, t, c));
+      }
+    }
+  }
   // Default rights for each module the first time it appears; after that Admin's choice is kept.
   const seen = new Set(String((db.prepare("SELECT value FROM meta WHERE key = 'process_rights_modules'").get() || {}).value || '').split(',').filter(Boolean));
   const ins = db.prepare('INSERT OR IGNORE INTO process_rights (process, resource) VALUES (?, ?)');
@@ -82,23 +144,6 @@ function migrate(db) {
     if (!seen.has(name)) { for (const p of res.processes || []) ins.run(p, name); seen.add(name); }
   }
   db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('process_rights_modules', ?)").run([...seen].join(','));
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS issue_replies (
-      id INTEGER PRIMARY KEY,
-      issue_id INTEGER NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
-      at TEXT NOT NULL DEFAULT (datetime('now')),
-      username TEXT, process TEXT, message TEXT NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS ix_issue_replies_issue ON issue_replies(issue_id);
-    -- Shop-floor layout: every save is a new version, so older layouts can be viewed or restored.
-    CREATE TABLE IF NOT EXISTS floor_layouts (
-      id INTEGER PRIMARY KEY,
-      version INTEGER NOT NULL UNIQUE,
-      data TEXT NOT NULL,
-      note TEXT, saved_by TEXT,
-      created_at TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-  `);
   // The four NEWAYS shop processes, added once. Admin can add more later.
   if (!db.prepare("SELECT 1 FROM meta WHERE key = 'shop_processes_seeded'").get()) {
     const ins = db.prepare("INSERT OR IGNORE INTO shop_processes (code, name, seq, unit, extra_fields, active) VALUES (?, ?, ?, ?, ?, 'Yes')");
@@ -141,4 +186,4 @@ function ensureAdmin(db, password) {
   return pw;
 }
 
-module.exports = { open, ensureAdmin, SCHEMA_VERSION };
+module.exports = { open, ensureAdmin, schema, createScript, SCHEMA_VERSION };
