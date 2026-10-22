@@ -257,7 +257,7 @@ html[data-theme="galaxy"] { background: #2a1a66 linear-gradient(135deg, #17123f 
   background: rgba(255, 255, 255, .07); border-color: rgba(255, 255, 255, .13); border-radius: 16px;
   -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); }
 [data-theme="galaxy"] .modal { background: #2a2068; }
-[data-theme="galaxy"] th { background: rgba(255, 255, 255, .06); }
+
 [data-theme="galaxy"] .btn { border-radius: 10px; }
 [data-theme="galaxy"] .btn.primary { background: linear-gradient(90deg, #7c3aed, #c026d3); border-color: transparent; }
 [data-theme="contrast"] a, [data-theme="contrast"] .btn { text-decoration-thickness: 2px; }
@@ -653,9 +653,13 @@ table.hourly thead th.num { font-size: 11px; }
 /* Faint sheet-metal drawing behind each page title */
 .page-head { position: relative; overflow: hidden; isolation: isolate; }
 .page-head > :not(.ph-art) { position: relative; z-index: 1; }
-.ph-art { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); height: max(118%, 128px); max-height: 160px; width: auto; color: var(--link);
-  opacity: .16; pointer-events: none; z-index: 0; }
-@media (max-width: 760px) { .ph-art { height: 90px; opacity: .08; top: 8px; transform: none; } }
+.ph-art { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); height: max(118%, 132px); max-height: 168px; width: auto; color: var(--link);
+  opacity: .3; pointer-events: none; z-index: 0; -webkit-mask-image: linear-gradient(to right, transparent, #000 35%); mask-image: linear-gradient(to right, transparent, #000 35%); }
+.ph-art .pa-f { fill: currentColor; stroke: none; opacity: .22; }
+.ph-art .pa-o { stroke-width: 1.8; }
+.ph-art .pa-d { stroke-width: 1; opacity: .75; }
+.ph-art .pa-a { stroke: var(--accent); stroke-width: 2; }
+@media (max-width: 760px) { .ph-art { height: 96px; opacity: .18; top: 8px; transform: none; } }
 @media print { .ph-art { display: none; } }
 
 /* Live production cards */
@@ -716,3 +720,41 @@ table.hourly thead th.num { font-size: 11px; }
 @media (max-width: 1100px) { .kit .span-3 { grid-column: span 6; } .kit .span-6 { grid-column: span 12; } .kit .row-2 { grid-row: auto; } }
 @media (max-width: 760px) { .kit .span-3 { grid-column: span 12; } .kit-tiles { grid-template-columns: repeat(2, 1fr); }
   .kit-tile:nth-child(n) { border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); } .kit-tile:nth-child(2n) { border-right: 0; } }
+
+/* Colour roles: titles, page headers, table headers, group rows, bubbles and information each have
+   their own colour in every theme, so each kind of text is easy to tell apart. */
+html[data-theme="light"] { --title: #0a2540; --th-bg: #dbe8f6; --th-ink: #0a3d73; --grp-bg: #fff4e5; --grp-ink: #7a4306; --hd-bg: #e7f0fa; --hd-edge: #0a5cad; --chip-bg: #f1f6fc; --info: #0a5cad; --stripe: #f9fbfd; }
+html[data-theme="dark"] { --title: #ffffff; --th-bg: #24384f; --th-ink: #cfe3fb; --grp-bg: #3a2f17; --grp-ink: #f5cf86; --hd-bg: #1d2f45; --hd-edge: #e8a948; --chip-bg: #222b35; --info: #86b8f3; --stripe: #20272e; }
+html[data-theme="green"] { --title: #1e4d3a; --th-bg: #24604a; --th-ink: #ffffff; --grp-bg: #fbf1dc; --grp-ink: #6e4a0c; --hd-bg: #e3efe8; --hd-edge: #e0a43a; --chip-bg: #eef5f0; --info: #1f6247; --stripe: #f7faf7; }
+html[data-theme="contrast"] { --title: #000000; --th-bg: #000000; --th-ink: #ffffff; --grp-bg: #ffcc00; --grp-ink: #000000; --hd-bg: #ffffff; --hd-edge: #000000; --chip-bg: #ffffff; --info: #00307a; --stripe: #f2f2f2; }
+html[data-theme="galaxy"] { --title: #ffffff; --th-bg: #4b3aa8; --th-ink: #fde7f3; --grp-bg: #4a2f5e; --grp-ink: #fbcfe8; --hd-bg: #3d2f8f; --hd-edge: #f472b6; --chip-bg: #372b80; --info: #99f6e4; --stripe: rgba(255, 255, 255, .035); }
+html[data-theme="kit"] { --title: #1c232f; --th-bg: #5b4fd8; --th-ink: #ffffff; --grp-bg: #efeefe; --grp-ink: #3b31a8; --hd-bg: #f1f0fe; --hd-edge: #5b4fd8; --chip-bg: #f6f5ff; --info: #4f43cc; --stripe: #fafbfd; }
+
+h1, h2, h3, .ph-text h1, .dcard-h h2, .kit-h h2, .ck-card h3 { color: var(--title, #1f3a5f); }
+.page-head { background: linear-gradient(115deg, var(--hd-bg, #e8eef7) 0%, var(--panel) 72%); border-left: 5px solid var(--hd-edge, #f0a43a); }
+.ph-icon { background: var(--panel); color: var(--hd-edge, #2c5282); box-shadow: 0 0 0 1px var(--line); }
+html:not([data-theme]) .ph-icon, html[data-theme="standard"] .ph-icon { color: #2c5282; }
+.ph-text p, .slicer-l, .dcard-h .muted, .stat-s { color: var(--info, #2c5282); }
+thead th, tfoot th { background: var(--th-bg, #1f3a5f); color: var(--th-ink, #ffffff); border-bottom-color: transparent; }
+thead th:first-child { border-top-left-radius: 6px; } thead th:last-child { border-top-right-radius: 6px; }
+tbody th { background: var(--hd-bg, #e8eef7); color: var(--title, #1f3a5f); }
+tbody tr:nth-child(even) > td { background: var(--stripe, #f8fafc); }
+tbody tr.group > td { background: var(--grp-bg, #fdf3e1); color: var(--grp-ink, #6b4410); border-left: 4px solid var(--hd-edge, #f0a43a); }
+tbody tr.group > td .muted, tbody tr.group > td span { color: var(--grp-ink, #6b4410); }
+tbody tr.click:hover > td { background: var(--hover); }
+.chip, .pbub .n, .sec-tab .n { background: var(--chip-bg, #eef3fa); }
+.chip.on { background: var(--primary); }
+.chip.on .n, .sec-tab.on .n { background: var(--on-primary); }
+.pbub { background: color-mix(in srgb, var(--pc) 9%, var(--chip-bg, #eef3fa)); }
+.pbub.on { background: color-mix(in srgb, var(--pc) 22%, var(--panel)); }
+.dcard-h { padding-bottom: 8px; border-bottom: 1px solid var(--line); }
+.dcard-i { background: var(--hd-bg, #e8eef7); color: var(--hd-edge, #2c5282); }
+html:not([data-theme]) .dcard-i, html[data-theme="standard"] .dcard-i { color: #2c5282; }
+.stat-l { color: var(--title, #1f3a5f); }
+.sec-tabs { background: var(--hd-bg, #e8eef7); }
+.pinfo-f small { color: var(--info, #2c5282); }
+tbody tr.here > td { background: var(--info-bg); }
+table.roster thead th.today { background: var(--th-bg, #1f3a5f); box-shadow: inset 0 -4px 0 var(--accent); }
+table.roster tbody td.today { background: color-mix(in srgb, var(--link) 10%, var(--panel)); }
+.pm-grid thead th.today { color: var(--th-ink, #ffffff); box-shadow: inset 0 -4px 0 var(--accent); }
+html[data-theme] .page-head { border-left: 5px solid var(--hd-edge, #f0a43a); }

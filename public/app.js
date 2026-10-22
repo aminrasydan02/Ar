@@ -1016,36 +1016,109 @@ function pageHead(title, iconName, sub, ...extra) {
       h('div', { class: 'ph-text' }, h('h1', {}, title), sub ? h('p', {}, sub) : null), extra));
 }
 
-// Faint sheet-metal line drawings behind each page title, chosen to suit the page.
+// Faint sheet-metal drawings behind each page title, chosen to suit the page.
+// Each drawing is a list of [layer, path]: o outline, f soft fill, d fine detail, a accent (sparks, beam, weld).
+const ring_ = (cx, cy, r) => `M${cx - r} ${cy}a${r} ${r} 0 1 0 ${2 * r} 0a${r} ${r} 0 1 0 ${-2 * r} 0`;
+function gear_(cx, cy, r, n) {
+  let d = '';
+  for (let i = 0; i < n * 2; i++) {
+    const a0 = (i / (n * 2)) * Math.PI * 2, a1 = ((i + 1) / (n * 2)) * Math.PI * 2, rr = i % 2 ? r : r + 7;
+    const p = (a, q) => `${(cx + q * Math.cos(a)).toFixed(1)} ${(cy + q * Math.sin(a)).toFixed(1)}`;
+    d += `${i ? 'L' : 'M'}${p(a0, rr)}L${p(a1, rr)}`;
+  }
+  return `${d}Z`;
+}
+const ticks_ = (x0, x1, y, step, big) => { let d = ''; for (let x = x0, i = 0; x <= x1; x += step, i++) d += `M${x} ${y}v${i % big ? -5 : -10}`; return d; };
+const spiral_ = (cx, cy, r0, r1, turns) => {
+  let d = `M${cx + r0} ${cy}`;
+  for (let i = 1; i <= turns * 36; i++) { const a = (i / 36) * Math.PI * 2, r = r0 + ((r1 - r0) * i) / (turns * 36); d += `L${(cx + r * Math.cos(a)).toFixed(1)} ${(cy + r * Math.sin(a)).toFixed(1)}`; }
+  return d;
+};
+const sparks_ = (x, y, n, len) => { let d = ''; for (let i = 0; i < n; i++) { const a = Math.PI * (1.05 + (i / (n - 1)) * 0.9), l = len * (0.55 + ((i * 37) % 10) / 22); d += `M${x} ${y}l${(Math.cos(a) * l).toFixed(1)} ${(-Math.sin(a) * l).toFixed(1)}`; } return d; };
 const ART = {
-  laser: 'M20 122 L84 94 H304 L240 122 Z M58 24 H296 M58 24 V36 M296 24 V36 M70 36 H284 M146 30 v18 h28 v-18 z M152 48 l8 10 l8 -10 M160 60 V104 ' +
-    'M120 112 l16 -7 h44 l-16 7 z M196 112 l14 -6 h30 l-14 6 z M100 104 l10 -4 h20 l-10 4 z M160 104 l-10 -7 M160 104 l11 -5 M160 104 l-3 -11 M160 104 l8 5 M160 104 l-12 2',
-  brake: 'M40 18 h240 v28 h-240 z M64 46 v80 M256 46 v80 M28 126 h264 M148 46 v20 l12 14 l12 -14 v-20 M116 102 h88 v14 h-88 z M148 102 l12 -12 l12 12 ' +
-    'M70 74 L160 90 L250 74 M236 30 h28 M56 30 h40 M44 60 h8 M268 60 h8',
-  plates: 'M40 112 L96 88 H292 L236 112 Z M40 100 L96 76 H292 L236 100 Z M40 88 L96 64 H292 L236 88 Z M40 76 L96 52 H292 L236 76 Z M40 76 V112 M236 76 V112 M292 52 V88 ' +
-    'M60 40 h30 M60 36 v8 M90 36 v8 M120 30 h56',
-  blueprint: 'M40 110 v-56 h70 v-20 h110 v20 h60 v56 z M70 82 a8 8 0 1 0 0.1 0 M250 82 a8 8 0 1 0 0.1 0 M140 72 h50 v22 h-50 z ' +
-    'M40 124 h240 M40 120 v8 M280 120 v8 M46 124 l-6 -3 v6 z M274 124 l6 -3 v6 z M296 34 v76 M292 34 h8 M292 110 h8 M110 18 h110 M110 14 v8 M220 14 v8',
-  weld: 'M40 112 h120 l20 -20 h100 M40 112 l20 -20 h120 M150 92 l10 20 M70 22 l60 46 M60 14 l16 12 l-6 8 l-16 -12 z M128 66 l10 10 ' +
-    'M150 92 l-14 -4 M150 92 l-2 -14 M150 92 l12 -10 M150 92 l16 2 M150 92 l-10 10 M176 104 q8 -4 16 0 q8 4 16 0 q8 -4 16 0',
-  machine: 'M40 30 h160 v92 h-160 z M54 44 h80 v50 h-80 z M150 44 h36 v24 h-36 z M156 80 a5 5 0 1 0 .1 0 M176 80 a5 5 0 1 0 .1 0 M150 100 h36 M200 50 h26 v72 h-26 ' +
-    'M260 60 a26 26 0 1 0 .1 0 M260 74 a12 12 0 1 0 .1 0 M260 30 v8 M260 108 v8 M226 86 h8 M286 86 h8 M236 62 l6 6 M278 104 l6 6 M236 110 l6 -6 M278 68 l6 -6 M30 122 h270',
-  caliper: 'M30 58 h250 v16 h-250 z M40 74 v40 l14 -10 v-30 M40 58 v-26 l12 8 v18 M150 50 h40 v32 h-40 z M164 82 v32 l-14 -10 v-22 M164 50 v-20 l-12 8 v12 ' +
-    'M60 58 v6 M70 58 v4 M80 58 v6 M90 58 v4 M100 58 v6 M110 58 v4 M120 58 v6 M130 58 v4 M210 58 v6 M220 58 v4 M230 58 v6 M240 58 v4 M250 58 v6 M260 58 v4',
-  rack: 'M40 20 v104 M280 20 v104 M40 52 h240 M40 88 h240 M40 124 h240 M56 30 h40 v22 h-40 z M104 34 h30 v18 h-30 z M190 26 h50 v26 h-50 z ' +
-    'M62 64 h60 v24 h-60 z M140 70 h28 v18 h-28 z M200 62 h56 v26 h-56 z M60 102 h44 v22 h-44 z M120 98 h60 v26 h-60 z M214 106 h34 v18 h-34 z',
-  factory: 'M20 124 V70 l40 -28 v28 l40 -28 v28 l40 -28 v28 l40 -28 v82 M220 124 V40 h18 v84 M244 124 V58 h52 v66 M18 124 h284 ' +
-    'M40 92 h22 v14 h-22 z M84 92 h22 v14 h-22 z M128 92 h22 v14 h-22 z M256 72 h12 v10 h-12 z M276 72 h12 v10 h-12 z M226 28 q6 -8 0 -16 M232 30 q8 -10 2 -20',
-  roll: 'M60 80 a36 36 0 1 0 .1 0 M60 104 a12 12 0 1 0 .1 0 M96 116 L292 116 M92 100 L292 100 M232 100 v16 M160 30 h60 v24 h-60 z M190 54 v36 M184 90 h12 ' +
-    'M40 124 h260 M110 124 l-10 -8 M80 124 l10 -8',
+  laser: () => [
+    ['f', 'M30 108 L80 80 H340 L290 108 Z M30 108 v28 h260 v-28 Z M290 136 L340 108 V80 L290 108 Z'],
+    ['o', 'M30 108 L80 80 H340 L290 108 Z M30 108 v28 h260 v-28 M290 136 L340 108 V80 M0 140 h360'],
+    ['f', 'M62 46 H334 V58 H62 Z M180 34 h30 v34 h-30 Z'],
+    ['o', 'M62 46 H334 V58 H62 Z M72 58 V92 M322 58 V84 M180 34 h30 v34 h-30 Z M187 68 l8 12 l8 -12 M334 46 q22 -18 0 -36 h-50 v24'],
+    ['d', 'M60 104 L98 86 H306 L268 104 Z M110 100 l10 -5 h34 l-10 5 z M168 100 l10 -5 h22 l-10 5 z M222 100 l10 -5 h30 l-10 5 z M122 92 l6 -3 h22 l-6 3 z M240 92 l6 -3 h22 l-6 3 z ' +
+      'M40 116 h60 M40 124 h60 M120 116 h40 M300 118 l30 -18 M300 128 l30 -18 M186 40 h18 M186 46 h18 M8 56 h22 v52 h-22 z M12 60 h14 v12 h-14 z' + ring_(15, 84, 3) + ring_(23, 84, 3) + ring_(15, 96, 3) + ring_(23, 96, 3)],
+    ['a', `M195 82 V100${sparks_(195, 100, 9, 16)}`],
+  ],
+  brake: () => [
+    ['f', 'M70 18 h220 v30 h-220 Z M48 18 h26 v118 h-26 Z M286 18 h26 v118 h-26 Z M76 104 h208 v32 h-208 Z'],
+    ['o', 'M70 18 h220 v30 h-220 Z M48 18 h26 v118 h-26 Z M286 18 h26 v118 h-26 Z M76 104 h208 v32 h-208 Z M150 48 v18 h60 v-18 M164 66 l16 18 l16 -18 M150 96 h60 v8 h-60 Z M170 96 l10 -9 l10 9 M0 140 h360'],
+    ['d', 'M100 2 v16 M92 2 h16 M260 2 v16 M252 2 h16 M84 30 h40 M236 30 h40 M240 98 v-14 h22 M78 52 v48 M282 52 v48 M90 116 h180 M90 124 h180 M54 40 h14 M54 120 h14 M292 40 h14 M292 120 h14 ' +
+      'M322 40 h30 v44 h-30 Z M326 44 h22 v14 h-22 Z M337 84 v52' + ring_(330, 70, 3) + ring_(344, 70, 3)],
+    ['a', 'M84 70 L180 87 L276 70'],
+  ],
+  plates: () => {
+    const out = [];
+    for (const y of [136, 128, 120, 112, 104]) {
+      out.push(['f', `M40 ${y} L100 ${y - 26} H320 L260 ${y} Z`]);
+      out.push(['o', `M40 ${y} L100 ${y - 26} H320 L260 ${y} Z M40 ${y} v5 h220 l60 -26 v-5`]);
+    }
+    out.push(['f', 'M70 64 L120 44 H300 L250 64 Z']);
+    out.push(['o', 'M70 64 L120 44 H300 L250 64 Z M70 64 v4 h180 l50 -20 v-4 M120 24 h150 M140 24 v26 M180 24 v24 M220 24 v22 M260 24 v20 M195 24 v-12 M188 12 h14 M0 142 h360']);
+    out.push(['d', `${ring_(140, 50, 4)}${ring_(180, 48, 4)}${ring_(220, 46, 4)}${ring_(260, 44, 4)}M195 0 v12 M290 112 h30 v12 h-30 Z M294 118 h22`]);
+    out.push(['a', 'M150 80 h-30 M320 84 l20 -10']);
+    return out;
+  },
+  blueprint: () => [
+    ['f', 'M20 8 h320 v144 h-320 Z'],
+    ['d', 'M20 28 h320 M20 48 h320 M20 68 h320 M20 88 h320 M20 108 h320 M20 128 h320 M60 8 v144 M100 8 v144 M140 8 v144 M180 8 v144 M220 8 v144 M260 8 v144 M300 8 v144'],
+    ['o', 'M20 8 h320 v144 h-320 Z M240 118 h100 M240 118 v34 M290 118 v34 M240 134 h100 M50 98 v-52 h12 v40 h70 v12 Z M160 46 h80 v52 h-80 Z' + ring_(180, 72, 6) + ring_(220, 72, 6)],
+    ['d', 'M160 58 h80 M50 110 h82 M50 106 v8 M132 106 v8 M54 110 l-4 -2 v4 Z M128 110 l4 -2 v4 Z M150 46 v52 M146 46 h8 M146 98 h8 M248 126 h34 M248 142 h34 M296 126 h36'],
+    ['a', 'M180 60 v24 M168 72 h24 M220 60 v24 M208 72 h24 M262 40 l60 -22 l6 6 l-60 22 Z M262 40 l-8 8 l14 -2'],
+  ],
+  weld: () => [
+    ['f', 'M36 136 h64 v-16 h-64 Z M58 120 v-40 h22 v40 Z M180 108 h150 v12 h-150 Z M250 66 h12 v42 h-12 Z'],
+    ['o', 'M36 136 h64 v-16 h-64 Z M58 120 v-40 h22 v40 M69 80 L140 38 M140 38 L212 70 M212 70 l18 22 M226 90 l8 8 M180 108 h150 v12 h-150 Z M250 66 h12 v42 h-12 M0 140 h360' + ring_(69, 80, 9) + ring_(140, 38, 8) + ring_(212, 70, 7)],
+    ['d', 'M76 78 L138 42 M88 70 L140 46 M144 44 L208 74 M60 128 h30 M190 114 h130 M100 40 q-20 -24 20 -30 M120 10 h40'],
+    ['a', `M236 104 q4 -4 8 0 q4 4 8 0 q4 -4 8 0 q4 4 8 0 q4 -4 8 0 q4 4 8 0${sparks_(236, 102, 9, 18)}`],
+  ],
+  machine: () => [
+    ['f', 'M30 30 h190 v104 h-190 Z' + gear_(292, 88, 30, 12)],
+    ['o', 'M30 30 h190 v104 h-190 Z M46 46 h104 v64 h-104 Z M162 46 h44 v30 h-44 Z M30 120 h190 M0 140 h360' + gear_(292, 88, 30, 12) + ring_(292, 88, 12)],
+    ['d', 'M60 96 h76 v8 h-76 Z M92 46 v22 h12 v-22 M98 68 v12 M166 50 h36 v22 h-36 Z M48 112 v8 M200 112 v8 M240 22 v-14 h12 v14 M236 22 h20 ' +
+      ring_(172, 90, 5) + ring_(192, 90, 5) + ring_(182, 104, 5) + 'M250 140 l26 -26 M270 108 a10 10 0 1 1 12 12'],
+    ['a', 'M246 8 v14 M240 12 h12 M86 82 l-6 -4 M110 82 l6 -4'],
+  ],
+  caliper: () => [
+    ['f', 'M24 56 h300 v18 h-300 Z M40 74 v46 l18 -12 v-34 Z M150 48 h50 v34 h-50 Z M166 82 v38 l-16 -12 v-26 Z'],
+    ['o', 'M24 56 h300 v18 h-300 Z M40 74 v46 l18 -12 v-34 M40 56 v-30 l14 10 v20 M150 48 h50 v34 h-50 Z M166 82 v38 l-16 -12 v-26 M166 48 v-22 l-14 10 v12 M324 64 h30 M0 140 h360' + ring_(214, 92, 7)],
+    ['d', ticks_(64, 140, 74, 4, 5) + ticks_(210, 318, 74, 4, 5) + ticks_(154, 196, 82, 4, 5) + 'M60 130 h90 v-10 h-10 v-20 h-70 v20 h-10 Z'],
+    ['a', 'M58 112 h92 M62 108 l-4 4 l4 4 M146 108 l4 4 l-4 4'],
+  ],
+  rack: () => [
+    ['f', 'M56 32 h44 v20 h-44 Z M110 36 h34 v16 h-34 Z M190 28 h54 v24 h-54 Z M64 64 h60 v24 h-60 Z M140 70 h30 v18 h-30 Z M60 102 h46 v22 h-46 Z M122 98 h60 v26 h-60 Z M262 96 h48 v28 h-48 Z'],
+    ['o', 'M40 18 v106 M200 18 v106 M40 52 h220 M40 88 h220 M40 124 h300 M260 18 v34 M56 32 h44 v20 h-44 Z M110 36 h34 v16 h-34 Z M190 28 h54 v24 h-54 Z M64 64 h60 v24 h-60 Z M140 70 h30 v18 h-30 Z M60 102 h46 v22 h-46 Z M122 98 h60 v26 h-60 Z ' +
+      'M262 96 h48 v28 h-48 Z M300 124 v-48 M300 76 h40 v24 h-40 M318 76 v-12 h22 v12 M296 136 h-46 M0 140 h360' + ring_(312, 130, 8) + ring_(338, 130, 8)],
+    ['d', 'M64 76 h60 M70 64 v24 M118 64 v24 M190 40 h54 M60 113 h46 M122 106 h60 M122 114 h60 M44 30 h8 M44 66 h8 M44 102 h8 M204 30 h8 M204 66 h8 M204 102 h8'],
+    ['a', 'M250 122 h50'],
+  ],
+  factory: () => [
+    ['f', 'M20 132 V74 l40 -28 v28 l40 -28 v28 l40 -28 v28 l40 -28 v86 Z M218 132 V40 h18 v92 Z M244 132 V62 h56 v70 Z'],
+    ['o', 'M20 132 V74 l40 -28 v28 l40 -28 v28 l40 -28 v28 l40 -28 v86 M218 132 V40 h18 v92 M244 132 V62 h56 v70 M0 136 h360 M300 108 h44 v24 h-44 M344 116 h10 l6 8 v8 h-16' + ring_(312, 134, 5) + ring_(350, 134, 5)],
+    ['d', 'M36 92 h22 v14 h-22 Z M80 92 h22 v14 h-22 Z M124 92 h22 v14 h-22 Z M36 112 h22 v14 h-22 Z M150 108 h20 v24 h-20 Z M256 74 h12 v10 h-12 Z M276 74 h12 v10 h-12 Z M256 92 h12 v10 h-12 Z M276 92 h12 v10 h-12 Z M262 112 h20 v20 h-20 Z M60 48 v26 M100 48 v26 M140 48 v26'],
+    ['a', 'M224 30 q8 -10 0 -18 q-8 -8 4 -14 M232 34 q10 -12 4 -22'],
+  ],
+  roll: () => [
+    ['f', ring_(70, 82, 40) + 'M44 132 h52 l-10 -18 h-32 Z M150 112 h170 v8 h-170 Z'],
+    ['o', ring_(70, 82, 40) + ring_(70, 82, 12) + 'M44 132 h52 l-10 -18 h-32 Z M106 92 L150 112 M150 112 h170 v8 h-170 M0 136 h360 M190 34 h70 v26 h-70 Z M225 60 v40' + ring_(170, 100, 9) + ring_(170, 130, 9) + ring_(205, 100, 9) + ring_(205, 130, 9)],
+    ['d', spiral_(70, 82, 14, 38, 4) + 'M260 108 v-8 M290 108 v-8 M330 100 h20 v20 h-20 Z M334 96 h20 v20'],
+    ['a', 'M219 104 h12 M225 98 v12'],
+  ],
 };
 const ART_FOR = { nest: 'laser', layers: 'plates', draw: 'blueprint', gear: 'machine', wrench: 'machine', clip: 'machine', alert: 'caliper', check: 'caliper',
   box: 'rack', list: 'rack', tag: 'rack', layout: 'factory', grid: 'factory', folder: 'factory', plus: 'blueprint', jt: 'brake', form: 'brake', pulse: 'laser',
   clock: 'brake', gantt: 'roll', users: 'weld', board: 'weld', cal: 'roll', chat: 'weld', route: 'roll', flow: 'roll', shield: 'factory', user: 'weld', search: 'blueprint' };
+const artCache = {};
 function pageArt(iconName) {
-  const d = ART[ART_FOR[iconName] || 'factory'];
-  return svg('svg', { class: 'ph-art', viewBox: '0 0 320 140', fill: 'none', stroke: 'currentColor', 'stroke-width': '2', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true' },
-    svg('path', { d }));
+  const name = ART_FOR[iconName] || 'factory';
+  const layers = artCache[name] || (artCache[name] = ART[name]());
+  return svg('svg', { class: 'ph-art', viewBox: '0 0 360 160', fill: 'none', stroke: 'currentColor', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true' },
+    layers.map(([cls, d]) => svg('path', { class: `pa-${cls}`, d })));
 }
 const icon = (n) => svg('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.8', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true' }, svg('path', { d: ICONS[n] }));
 
