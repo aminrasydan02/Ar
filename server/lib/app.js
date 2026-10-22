@@ -5,7 +5,7 @@ const crypto = require('node:crypto');
 const { resources, PROCESSES } = require('./resources');
 const { ROLES, can, rightsFor } = require('./perm');
 const auth = require('./auth');
-const { FORMATS, MIME, parseDrawingName, safeFilename } = require('./drawings');
+const { FORMATS, MODEL_FORMATS, MIME, parseDrawingName, safeFilename, checkContent } = require('./drawings');
 const { buildDashboard } = require('./dashboard');
 const { readJobTravellers } = require('./jtimport');
 const templates = require('./templates');
@@ -73,7 +73,7 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
 
   function allow(user, action, resource) {
     if (!user) throw new HttpError(401, 'Please sign in');
-    if (!can(user.role, action, resource)) throw new HttpError(403, `Your role (${user.role}) cannot ${action} ${resource}`);
+    if (!can(user, action, resource)) throw new HttpError(403, `${user.process || user.role} cannot ${action} ${resource.replace(/_/g, ' ')}`);
   }
 
   // ---- generic records ----------------------------------------------------
@@ -122,6 +122,12 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
     };
   }
 
+  // No code in the website: text that looks like HTML or script is refused, never stored.
+  const CODE = /<\s*[a-z!/?][^>]*>|javascript\s*:|vbscript\s*:|data\s*:\s*text\/html/i;
+  function noCode(label, v) {
+    if (CODE.test(String(v))) throw new HttpError(400, `${label}: code, HTML or script is not allowed`);
+  }
+
   function clean(name, input, { partial }) {
     const res = resources[name];
     const out = {};
@@ -141,6 +147,7 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
           const ok = v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).length <= 30 &&
             Object.values(v).every((x) => ['string', 'number'].includes(typeof x) && String(x).length <= 500);
           if (!ok) { errors.push(`${f.label} must be a list of short values`); continue; }
+          Object.values(v).forEach((x) => noCode(f.label, x));
           v = JSON.stringify(v);
         } else if (f.type === 'number' || f.type === 'ref') {
           const n = Number(v);
@@ -148,6 +155,7 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
           v = f.type === 'ref' ? Math.trunc(n) : n;
         } else {
           v = String(v).trim();
+          noCode(f.label, v);
           if (f.type === 'date' && !/^\d{4}-\d{2}-\d{2}$/.test(v)) { errors.push(`${f.label} must be a date (YYYY-MM-DD)`); continue; }
           if (f.type === 'select' && !f.options.includes(v)) { errors.push(`${f.label} must be one of: ${f.options.join(', ')}`); continue; }
         }
@@ -260,8 +268,13 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
     const partNo = (url.searchParams.get('part_no') || parsed.part_no).trim();
     const rev = (url.searchParams.get('rev') || parsed.rev).trim().toUpperCase();
     if (!partNo) throw new HttpError(400, 'Part number missing');
+    const jtId = Number(url.searchParams.get('job_traveller_id')) || null;
+    if (jtId && !db.prepare('SELECT id FROM job_travellers WHERE id = ?').get(jtId)) throw new HttpError(400, 'Job Traveller not found');
     const body = await readBody(req, MAX_UPLOAD);
     if (!body.length) throw new HttpError(400, 'File is empty');
+    const bad = checkContent(parsed.format, body);
+    if (bad) throw new HttpError(400, bad);
+    const kind = MODEL_FORMATS.includes(parsed.format) ? '3D model' : ['png', 'jpg', 'jpeg'].includes(parsed.format) ? 'Image' : 'Drawing';
     const dup = db.prepare('SELECT id FROM drawings WHERE part_no = ? AND rev = ? AND format = ?').get(partNo, rev, parsed.format);
     if (dup) throw new HttpError(409, `Drawing ${partNo} rev ${rev || '-'} (${parsed.format}) already exists`);
     const storedName = `${Date.now()}-${crypto.randomBytes(6).toString('hex')}.${parsed.format}`;
@@ -271,8 +284,8 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
       // A new revision of the same part and format supersedes the older ones.
       db.prepare("UPDATE drawings SET status = 'Superseded', updated_at = datetime('now') WHERE part_no = ? AND format = ? AND status = 'Current'")
         .run(partNo, parsed.format);
-      const r = db.prepare(`INSERT INTO drawings (part_no, rev, format, status, filename, size, stored_name, uploaded_by)
-        VALUES (?, ?, ?, 'Current', ?, ?, ?, ?)`).run(partNo, rev, parsed.format, filename, body.length, storedName, user.username);
+      const r = db.prepare(`INSERT INTO drawings (part_no, rev, format, kind, job_traveller_id, status, filename, size, stored_name, uploaded_by)
+        VALUES (?, ?, ?, ?, ?, 'Current', ?, ?, ?, ?)`).run(partNo, rev, parsed.format, kind, jtId, filename, body.length, storedName, user.username);
       db.exec('COMMIT');
       const id = Number(r.lastInsertRowid);
       audit(user, 'upload', 'drawings', id);
@@ -300,7 +313,7 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
 
   function generateWorkflow(partId, user) {
     if (!user) throw new HttpError(401, 'Please sign in');
-    if (!can(user.role, 'update', 'parts')) throw new HttpError(403, 'Not allowed');
+    if (!can(user, 'update', 'parts')) throw new HttpError(403, 'Not allowed');
     getRecord('parts', partId);
     const existing = db.prepare('SELECT COUNT(*) AS n FROM wf_steps WHERE part_id = ?').get(partId).n;
     if (existing) throw new HttpError(409, 'This part already has workflow steps');
@@ -362,6 +375,71 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
       FROM jt_steps s JOIN shop_processes p ON p.id = s.process_id
       LEFT JOIN operator_outputs o ON o.job_traveller_id = s.job_traveller_id AND o.process_id = s.process_id
       WHERE s.job_traveller_id = ? GROUP BY s.id ORDER BY COALESCE(s.seq, p.seq), p.seq`).all(id);
+  }
+
+  // Everything about one Job Traveller: where it is now, each stage, parts, files, issues.
+  function jtInfo(id) {
+    const jt = getRecord('job_travellers', id);
+    const steps = jtProgress(id).map((st) => ({ ...st,
+      state: st.target_qty && st.good >= st.target_qty ? 'Done' : st.good || st.reject ? 'In progress' : 'Pending' }));
+    const current = steps.find((st) => st.state !== 'Done') || null;
+    const part = db.prepare('SELECT * FROM parts WHERE part_no = ?').get(jt.part_no) || null;
+    const jtOf = db.prepare("SELECT id, jt_no, status FROM job_travellers WHERE part_no = ? AND status != 'Cancelled' ORDER BY id DESC LIMIT 1");
+    const withJt = (p) => p && { part_no: p.part_no, description: p.description, qty_per_set: p.qty_per_set, jt: jtOf.get(p.part_no) || null };
+    return {
+      jt, steps, current: current ? current.process : steps.length ? 'Completed' : null,
+      part, parent: part && part.parent_no ? withJt(db.prepare('SELECT * FROM parts WHERE part_no = ?').get(part.parent_no)) : null,
+      children: db.prepare('SELECT * FROM parts WHERE parent_no = ? ORDER BY part_no').all(jt.part_no).map(withJt),
+      drawings: listRecords('drawings', new URLSearchParams()).filter((d) => d.job_traveller_id === jt.id || d.part_no === jt.part_no),
+      issues: db.prepare(`SELECT id, issue_no, title, status, priority, to_process FROM issues
+        WHERE job_traveller_id = ? OR (part_no IS NOT NULL AND part_no = ?) ORDER BY id DESC`).all(jt.id, jt.part_no),
+    };
+  }
+
+  // New project with a mother part and its child parts (any depth) in one go.
+  // parts: [{ key, parent_key, part_no, description, material, thickness, qty_per_parent, process_ids }]
+  function createProjectTree(b, user) {
+    allow(user, 'create', 'projects');
+    allow(user, 'create', 'parts');
+    if (b.create_jts) allow(user, 'create', 'job_travellers');
+    const list = Array.isArray(b.parts) ? b.parts : [];
+    if (!list.length) throw new HttpError(400, 'Add at least the mother part');
+    if (list.length > 500) throw new HttpError(400, 'At most 500 parts per project');
+    const sets = Math.max(1, Math.trunc(Number(b.sets) || 1));
+    const byKey = new Map();
+    db.exec('BEGIN');
+    try {
+      const project = createRecord('projects', clean('projects', b.project || {}, { partial: false }), user);
+      const out = [];
+      for (const [i, raw] of list.entries()) {
+        const parent = raw.parent_key != null && raw.parent_key !== '' ? byKey.get(String(raw.parent_key)) : null;
+        if (raw.parent_key != null && raw.parent_key !== '' && !parent) throw new HttpError(400, `Line ${i + 1}: parent part must come before its child`);
+        const qtyPer = Number(raw.qty_per_parent ?? 1);
+        if (!(qtyPer > 0)) throw new HttpError(400, `Line ${i + 1}: Qty per parent must be more than 0`);
+        const data = { project_id: project.id, part_no: raw.part_no, parent_no: parent ? parent.part_no : null,
+          description: raw.description, material: raw.material, thickness: raw.thickness,
+          qty_per_set: qtyPer * (parent ? parent.qty_per_set : 1), sets };
+        let part;
+        try { part = createRecord('parts', clean('parts', data, { partial: false }), user); } catch (err) { throw new HttpError(err.status || 400, `Line ${i + 1}: ${err.message}`); }
+        byKey.set(String(raw.key ?? i), part);
+        let jt = null;
+        if (b.create_jts) {
+          jt = createRecord('job_travellers', clean('job_travellers', { project_id: project.id, customer: project.customer, part_no: part.part_no,
+            description: part.description, material: part.material, thickness: part.thickness, qty: part.qty_per_set * sets, due_date: project.due_date }, { partial: false }), user);
+          const procs = (Array.isArray(raw.process_ids) ? raw.process_ids : []).map(Number)
+            .map((pid) => db.prepare('SELECT id, seq FROM shop_processes WHERE id = ?').get(pid)).filter(Boolean);
+          for (const pr of procs) {
+            createRecord('jt_steps', { job_traveller_id: jt.id, process_id: pr.id, seq: pr.seq, target_qty: jt.qty }, user);
+          }
+        }
+        out.push({ ...part, jt_id: jt && jt.id, jt_no: jt && jt.jt_no });
+      }
+      db.exec('COMMIT');
+      return { project, parts: out };
+    } catch (err) {
+      db.exec('ROLLBACK');
+      throw err;
+    }
   }
 
   // Excel/CSV import. Without commit=1 it only shows what would change.
@@ -428,6 +506,7 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
       const message = String(b.message || '').trim();
       if (!message) throw new HttpError(400, 'Write a message first');
       if (message.length > 5000) throw new HttpError(400, 'Message is too long (5000 characters at most)');
+      noCode('Message', message);
       const r = db.prepare('INSERT INTO issue_replies (issue_id, username, process, message) VALUES (?, ?, ?, ?)')
         .run(issueId, user.username, user.process || null, message);
       db.prepare("UPDATE issues SET updated_at = datetime('now') WHERE id = ?").run(issueId);
@@ -463,6 +542,7 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
       if (!ROLES.includes(b.role)) throw new HttpError(400, 'Role must be admin, planner or viewer');
       if (String(b.password || '').length < 8) throw new HttpError(400, 'Password must be at least 8 characters');
       const proc = checkProcess(b.process);
+      noCode('Full name', b.full_name || '');
       try {
         const r = db.prepare('INSERT INTO users (username, full_name, role, process, password_hash) VALUES (?, ?, ?, ?, ?)')
           .run(username, String(b.full_name || ''), b.role, proc, auth.hashPassword(b.password));
@@ -479,6 +559,7 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
         throw new HttpError(400, 'You cannot remove your own Admin access');
       }
       if (b.password !== undefined && String(b.password).length < 8) throw new HttpError(400, 'Password must be at least 8 characters');
+      noCode('Full name', b.full_name || '');
       db.prepare('UPDATE users SET full_name = COALESCE(?, full_name), role = COALESCE(?, role), active = COALESCE(?, active) WHERE id = ?')
         .run(b.full_name ?? null, b.role ?? null, b.active === undefined ? null : (b.active ? 1 : 0), id);
       if (b.process !== undefined) db.prepare('UPDATE users SET process = ? WHERE id = ?').run(checkProcess(b.process), id);
@@ -507,13 +588,17 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
     res.writeHead(200, {
       'Content-Type': STATIC_TYPES[path.extname(file)] || 'application/octet-stream',
       'X-Content-Type-Options': 'nosniff',
-      'Content-Security-Policy': "default-src 'self'; img-src 'self' data: blob:; frame-src 'self' blob:; object-src 'self'",
+      'Content-Security-Policy': "default-src 'self'; img-src 'self' data: blob:; frame-src 'self' blob:; object-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'self'",
+      'X-Frame-Options': 'SAMEORIGIN',
+      'Referrer-Policy': 'no-referrer',
       'Cache-Control': 'no-cache',
     });
     fs.createReadStream(file).pipe(res);
   }
 
   // ---- router -------------------------------------------------------------
+
+  const failedLogins = new Map(); // username -> times of recent wrong passwords
 
   async function route(req, res) {
     const url = new URL(req.url, 'http://local');
@@ -537,14 +622,19 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
 
     if (parts[0] === 'login' && method === 'POST') {
       const b = await readJson(req);
+      const name = String(b.username || '').trim().toLowerCase();
+      const fails = (failedLogins.get(name) || []).filter((t) => Date.now() - t < 15 * 60000);
+      if (fails.length >= 5) throw new HttpError(429, 'Too many wrong passwords. Try again in 15 minutes');
       const row = db.prepare('SELECT * FROM users WHERE username = ?').get(String(b.username || '').trim());
       if (!row || !row.active || !auth.verifyPassword(String(b.password || ''), row.password_hash)) {
+        failedLogins.set(name, [...fails, Date.now()]);
         throw new HttpError(401, 'Wrong username or password');
       }
+      failedLogins.delete(name);
       const s = auth.createSession(db, row.id);
       audit(row, 'login', 'users', row.id);
       const cookie = `smm_session=${s.token}; HttpOnly; SameSite=Strict; Path=/; Expires=${new Date(s.expires).toUTCString()}${secureCookies ? '; Secure' : ''}`;
-      return send(res, 200, { user: publicUser(row), rights: rightsFor(row.role) }, { 'Set-Cookie': cookie });
+      return send(res, 200, { user: publicUser(row), rights: rightsFor(row) }, { 'Set-Cookie': cookie });
     }
     if (parts[0] === 'logout' && method === 'POST') {
       if (cookies.smm_session) auth.destroySession(db, cookies.smm_session);
@@ -553,7 +643,7 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
     if (!user) throw new HttpError(401, 'Please sign in');
 
     if (parts[0] === 'me' && parts.length === 1 && method === 'GET') {
-      return send(res, 200, { user, rights: rightsFor(user.role), version: VERSION });
+      return send(res, 200, { user, rights: rightsFor(user), version: VERSION });
     }
     if (parts[0] === 'me' && parts[1] === 'password' && method === 'POST') {
       const b = await readJson(req);
@@ -585,6 +675,13 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
     }
     if (parts[0] === 'job_travellers' && parts[1] === 'import' && method === 'POST') {
       return send(res, 200, await importJobTravellers(req, url, user));
+    }
+    if (parts[0] === 'job_travellers' && parts[2] === 'info' && method === 'GET') {
+      allow(user, 'read', 'job_travellers');
+      return send(res, 200, jtInfo(Number(parts[1])));
+    }
+    if (parts[0] === 'projects' && parts[1] === 'tree' && method === 'POST') {
+      return send(res, 201, createProjectTree(await readJson(req), user));
     }
     if (parts[0] === 'job_travellers' && parts[2] === 'progress' && method === 'GET') {
       allow(user, 'read', 'job_travellers');

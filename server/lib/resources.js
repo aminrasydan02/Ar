@@ -285,6 +285,7 @@ const resources = {
       { name: 'to_process', label: 'Needs action from', type: 'select', options: PROCESSES, required: true },
       { name: 'project_id', label: 'Project', type: 'ref', ref: 'projects' },
       { name: 'part_no', label: 'Part number', type: 'text' },
+      { name: 'job_traveller_id', label: 'Job Traveller', type: 'ref', ref: 'job_travellers' },
       { name: 'priority', label: 'Priority', type: 'select', options: ['Low', 'Normal', 'High', 'Urgent'], default: 'Normal' },
       { name: 'status', label: 'Status', type: 'select', options: ['Open', 'In progress', 'Resolved', 'Closed'], default: 'Open' },
       { name: 'opened', label: 'Opened', type: 'date' },
@@ -303,5 +304,17 @@ const SYSTEM_TYPES = { number: 'REAL', ref: 'INTEGER' };
 function columnType(field) {
   return SYSTEM_TYPES[field.type] || 'TEXT';
 }
+
+// Which process owns (can create and edit) each kind of data. Data not listed is shared.
+const OWNERS = {
+  shop_processes: ['Planner'], projects: ['Planner', 'Designer'], parts: ['Planner', 'Designer', 'Engineer'],
+  routings: ['Planner', 'Engineer'], nestings: ['Planner', 'Engineer'], wf_steps: ['Planner', 'Supervisor'],
+  machines: ['Technician'], tooling: ['Technician', 'Engineer'], plates: ['Technician'],
+  drawings: ['Designer', 'Engineer', 'Planner'], maint_orders: ['Technician', 'Supervisor'],
+  ncrs: ['Supervisor', 'Engineer'], reason_codes: ['Supervisor', 'Planner'],
+  job_travellers: ['Planner', 'Supervisor'], jt_steps: ['Planner', 'Engineer'],
+  operator_outputs: ['Operator', 'Supervisor'],
+};
+for (const [name, list] of Object.entries(OWNERS)) resources[name].processes = list;
 
 module.exports = { resources, columnType, MACHINE_TYPES, MATERIALS, PROCESSES };

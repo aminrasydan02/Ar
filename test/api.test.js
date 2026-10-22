@@ -129,7 +129,7 @@ test('drawing upload reads part number and revision, supersedes older revision',
   assert.equal(b.status, 201);
   const old = await call(viewer, 'GET', `/api/drawings/${a.data.id}`);
   assert.equal(old.data.status, 'Superseded');
-  const dup = await call(planner, 'POST', `/api/drawings/upload?filename=${encodeURIComponent('606118901_PART_1 Rev C.pdf')}`, Buffer.from('x'));
+  const dup = await call(planner, 'POST', `/api/drawings/upload?filename=${encodeURIComponent('606118901_PART_1 Rev C.pdf')}`, Buffer.from('%PDF-1.4 x'));
   assert.equal(dup.status, 409);
   const bad = await call(planner, 'POST', '/api/drawings/upload?filename=evil.exe', Buffer.from('x'));
   assert.equal(bad.status, 400);
@@ -409,4 +409,47 @@ test('Excel template: download, fill, check, import; Excel export', async () => 
   const out = readXlsx(Buffer.from(await ex.arrayBuffer()))[0];
   assert.equal(out.rows[1][0], 'ID');
   assert.ok(out.rows.some((r) => r && r.includes('TPL-001') && r.includes('30/11/2026')));
+});
+
+test('planner creates a project with mother and child parts, and Job Travellers', async () => {
+  const procs = (await call(admin, 'GET', '/api/shop_processes')).data;
+  const laser = procs.find((p) => p.code === 'LASER').id;
+  const r = await call(planner, 'POST', '/api/projects/tree', {
+    project: { code: 'TREE1', name: 'Cabinet', customer: 'ACME', due_date: '2026-12-01' }, sets: 10, create_jts: true,
+    parts: [
+      { key: 'm', part_no: 'CAB-ASSY', description: 'Cabinet assembly' },
+      { key: 'c1', parent_key: 'm', part_no: 'CAB-SIDE', qty_per_parent: 2, material: 'SPCC', thickness: 1.2, process_ids: [laser] },
+      { key: 'c2', parent_key: 'c1', part_no: 'CAB-BRKT', qty_per_parent: 3 },
+    ],
+  });
+  assert.equal(r.status, 201);
+  const [m, side, brkt] = r.data.parts;
+  assert.equal(m.qty_per_set, 1);
+  assert.equal(side.parent_no, 'CAB-ASSY');
+  assert.equal(brkt.qty_per_set, 6);
+  const infoR = await call(planner, 'GET', `/api/job_travellers/${side.jt_id}/info`);
+  assert.equal(infoR.status, 200, JSON.stringify(infoR.data));
+  const info = infoR.data;
+  assert.equal(info.jt.qty, 20);
+  assert.equal(info.parent.part_no, 'CAB-ASSY');
+  assert.equal(info.children[0].part_no, 'CAB-BRKT');
+  assert.equal(info.steps[0].state, 'Pending');
+  assert.equal(info.current, 'Laser Cutting');
+  // A bad line undoes the whole project.
+  const bad = await call(planner, 'POST', '/api/projects/tree', { project: { code: 'TREE2', name: 'x' }, parts: [{ part_no: 'A1' }, { part_no: 'A2', parent_key: 'zz' }] });
+  assert.equal(bad.status, 400);
+  assert.equal((await call(admin, 'GET', '/api/projects?code=TREE2')).data.length, 0);
+});
+
+test('no code can be saved, and uploads must be real drawing files', async () => {
+  let r = await call(planner, 'POST', '/api/projects', { code: 'XSS', name: '<script>alert(1)</script>' });
+  assert.equal(r.status, 400);
+  assert.match(r.data.error, /not allowed/);
+  r = await call(planner, 'POST', '/api/projects', { code: 'XSS2', name: 'Bracket qty < 5 and > 2' });
+  assert.equal(r.status, 201);
+  r = await call(planner, 'POST', '/api/drawings/upload?filename=x.pdf', Buffer.from('<html><script>alert(1)</script></html>'));
+  assert.equal(r.status, 400);
+  r = await call(planner, 'POST', '/api/drawings/upload?filename=PANEL-9%20Rev%20A.step', Buffer.from('ISO-10303-21;\nHEADER;'));
+  assert.equal(r.status, 201);
+  assert.equal(r.data.kind, '3D model');
 });
