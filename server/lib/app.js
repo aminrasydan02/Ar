@@ -2,7 +2,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { resources } = require('./resources');
+const { resources, PROCESSES } = require('./resources');
 const { ROLES, can, rightsFor } = require('./perm');
 const auth = require('./auth');
 const { FORMATS, MIME, parseDrawingName, safeFilename } = require('./drawings');
@@ -16,6 +16,12 @@ const STATIC_TYPES = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.png': 'image/png',
 };
+
+// Today's date on the server clock (local time), as YYYY-MM-DD.
+function localToday() {
+  const d = new Date();
+  return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+}
 
 class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
@@ -152,15 +158,37 @@ function createApp({ db, drawingsDir, secureCookies = false }) {
     return err;
   }
 
-  function nextNcrNo(date) {
-    const year = String(date || new Date().toISOString()).slice(0, 4);
-    const row = db.prepare("SELECT ncr_no FROM ncrs WHERE ncr_no LIKE ? ORDER BY ncr_no DESC LIMIT 1").get(`NCR-${year}-%`);
-    const n = row ? Number(row.ncr_no.split('-')[2]) + 1 : 1;
-    return `NCR-${year}-${String(n).padStart(4, '0')}`;
+  // Running numbers per year, e.g. NCR-2026-0001 or ISS-2026-0001.
+  function nextNumber(table, column, prefix, date) {
+    const year = String(date || localToday()).slice(0, 4);
+    const row = db.prepare(`SELECT ${column} AS no FROM ${table} WHERE ${column} LIKE ? ORDER BY ${column} DESC LIMIT 1`).get(`${prefix}-${year}-%`);
+    const n = row ? Number(row.no.split('-')[2]) + 1 : 1;
+    return `${prefix}-${year}-${String(n).padStart(4, '0')}`;
+  }
+
+  // Values a new record takes from the signed-in user when the form leaves them empty.
+  function userDefaults(name, input, user) {
+    const out = { ...input };
+    const blank = (k) => out[k] === undefined || out[k] === null || out[k] === '';
+    if (name === 'daily_logs') {
+      if (blank('date')) out.date = localToday();
+      if (blank('process') && user.process) out.process = user.process;
+    }
+    if (name === 'issues') {
+      if (blank('opened')) out.opened = localToday();
+      if (blank('from_process') && user.process) out.from_process = user.process;
+    }
+    return out;
   }
 
   function createRecord(name, data, user) {
-    if (name === 'ncrs') data.ncr_no = nextNcrNo(data.date);
+    if (name === 'ncrs') data.ncr_no = nextNumber('ncrs', 'ncr_no', 'NCR', data.date);
+    if (name === 'issues') {
+      data.issue_no = nextNumber('issues', 'issue_no', 'ISS', data.opened);
+      data.raised_by = user.username;
+      if (['Resolved', 'Closed'].includes(data.status) && !data.resolved) data.resolved = localToday();
+    }
+    if (name === 'daily_logs') data.logged_by = user.username;
     const cols = Object.keys(data);
     try {
       const r = db.prepare(`INSERT INTO ${name} (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
@@ -172,7 +200,12 @@ function createApp({ db, drawingsDir, secureCookies = false }) {
   }
 
   function updateRecord(name, id, data, user) {
-    getRecord(name, id);
+    const current = getRecord(name, id);
+    const owner = resources[name].ownerField;
+    if (owner && user.role !== 'admin' && current[owner] !== user.username) {
+      throw new HttpError(403, `Only ${current[owner] || 'the person who wrote it'} or Admin can change this ${resources[name].singular.toLowerCase()}`);
+    }
+    if (name === 'issues' && ['Resolved', 'Closed'].includes(data.status) && !current.resolved && !data.resolved) data.resolved = localToday();
     const cols = Object.keys(data);
     if (cols.length) {
       try {
@@ -272,10 +305,40 @@ function createApp({ db, drawingsDir, secureCookies = false }) {
     return listRecords('wf_steps', new URLSearchParams({ part_id: String(partId) }));
   }
 
+  // ---- issue discussion -------------------------------------------------
+
+  async function handleReplies(req, res, method, issueId, user) {
+    allow(user, 'read', 'issues');
+    getRecord('issues', issueId);
+    if (method === 'GET') {
+      return send(res, 200, db.prepare('SELECT * FROM issue_replies WHERE issue_id = ? ORDER BY id').all(issueId));
+    }
+    if (method === 'POST') {
+      allow(user, 'update', 'issues');
+      const b = await readJson(req);
+      const message = String(b.message || '').trim();
+      if (!message) throw new HttpError(400, 'Write a message first');
+      if (message.length > 5000) throw new HttpError(400, 'Message is too long (5000 characters at most)');
+      const r = db.prepare('INSERT INTO issue_replies (issue_id, username, process, message) VALUES (?, ?, ?, ?)')
+        .run(issueId, user.username, user.process || null, message);
+      db.prepare("UPDATE issues SET updated_at = datetime('now') WHERE id = ?").run(issueId);
+      audit(user, 'reply', 'issues', issueId);
+      return send(res, 201, db.prepare('SELECT * FROM issue_replies WHERE id = ?').get(r.lastInsertRowid));
+    }
+    throw new HttpError(405, 'Method not allowed');
+  }
+
   // ---- users --------------------------------------------------------------
 
   function publicUser(u) {
-    return { id: u.id, username: u.username, full_name: u.full_name, role: u.role, active: !!u.active, created_at: u.created_at };
+    return { id: u.id, username: u.username, full_name: u.full_name, role: u.role, process: u.process || null, active: !!u.active, created_at: u.created_at };
+  }
+
+  function checkProcess(p) {
+    if (p !== undefined && p !== null && p !== '' && !PROCESSES.includes(p)) {
+      throw new HttpError(400, `Process must be one of: ${PROCESSES.join(', ')}`);
+    }
+    return p || null;
   }
 
   async function handleUsers(req, res, method, id, user) {
@@ -290,9 +353,10 @@ function createApp({ db, drawingsDir, secureCookies = false }) {
       if (!/^[\w.-]{3,40}$/.test(username)) throw new HttpError(400, 'Username: 3-40 letters, numbers, . _ -');
       if (!ROLES.includes(b.role)) throw new HttpError(400, 'Role must be admin, planner or viewer');
       if (String(b.password || '').length < 8) throw new HttpError(400, 'Password must be at least 8 characters');
+      const proc = checkProcess(b.process);
       try {
-        const r = db.prepare('INSERT INTO users (username, full_name, role, password_hash) VALUES (?, ?, ?, ?)')
-          .run(username, String(b.full_name || ''), b.role, auth.hashPassword(b.password));
+        const r = db.prepare('INSERT INTO users (username, full_name, role, process, password_hash) VALUES (?, ?, ?, ?, ?)')
+          .run(username, String(b.full_name || ''), b.role, proc, auth.hashPassword(b.password));
         audit(user, 'create', 'users', Number(r.lastInsertRowid));
         return send(res, 201, publicUser(db.prepare('SELECT * FROM users WHERE id = ?').get(r.lastInsertRowid)));
       } catch (err) { throw friendlyDbError(err); }
@@ -308,6 +372,7 @@ function createApp({ db, drawingsDir, secureCookies = false }) {
       if (b.password !== undefined && String(b.password).length < 8) throw new HttpError(400, 'Password must be at least 8 characters');
       db.prepare('UPDATE users SET full_name = COALESCE(?, full_name), role = COALESCE(?, role), active = COALESCE(?, active) WHERE id = ?')
         .run(b.full_name ?? null, b.role ?? null, b.active === undefined ? null : (b.active ? 1 : 0), id);
+      if (b.process !== undefined) db.prepare('UPDATE users SET process = ? WHERE id = ?').run(checkProcess(b.process), id);
       if (b.password) db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(auth.hashPassword(b.password), id);
       if (b.active === false || b.password) db.prepare('DELETE FROM sessions WHERE user_id = ?').run(id);
       audit(user, 'update', 'users', id);
@@ -395,7 +460,7 @@ function createApp({ db, drawingsDir, secureCookies = false }) {
       for (const [name, r] of Object.entries(resources)) {
         meta[name] = { ...r, fields: r.fields.filter((f) => !f.hidden) };
       }
-      return send(res, 200, { resources: meta, formats: FORMATS, roles: ROLES });
+      return send(res, 200, { resources: meta, formats: FORMATS, roles: ROLES, processes: PROCESSES });
     }
     if (parts[0] === 'dashboard' && method === 'GET') return send(res, 200, buildDashboard(db));
     if (parts[0] === 'users') return handleUsers(req, res, method, parts[1] ? Number(parts[1]) : null, user);
@@ -408,6 +473,11 @@ function createApp({ db, drawingsDir, secureCookies = false }) {
     }
     if (parts[0] === 'drawings' && parts[2] === 'file' && method === 'GET') {
       return sendDrawing(res, Number(parts[1]), user, url.searchParams.get('download') === '1');
+    }
+    if (parts[0] === 'issues' && parts[2] === 'replies' && parts.length === 3) {
+      const issueId = Number(parts[1]);
+      if (!Number.isInteger(issueId)) throw new HttpError(404, 'Not found');
+      return handleReplies(req, res, method, issueId, user);
     }
     if (parts[0] === 'parts' && parts[2] === 'workflow' && method === 'POST') {
       return send(res, 201, generateWorkflow(Number(parts[1]), user));
@@ -432,7 +502,7 @@ function createApp({ db, drawingsDir, secureCookies = false }) {
     if (method === 'GET') { allow(user, 'read', name); return send(res, 200, getRecord(name, id)); }
     if (method === 'POST' && !id) {
       allow(user, 'create', name);
-      return send(res, 201, createRecord(name, clean(name, await readJson(req), { partial: false }), user));
+      return send(res, 201, createRecord(name, clean(name, userDefaults(name, await readJson(req), user), { partial: false }), user));
     }
     if (method === 'PUT' && id) {
       allow(user, 'update', name);

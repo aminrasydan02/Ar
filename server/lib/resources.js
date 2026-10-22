@@ -6,6 +6,9 @@
 const MACHINE_TYPES = ['Fiber laser', 'Press brake', 'Clinching/PEM press', 'Polishing/grinding',
   'Shearing', 'Turret punch', 'Welding', 'General'];
 const MATERIALS = ['Aluminium', 'SS', 'SPCC', 'SECC', 'GI', 'Copper', 'Other'];
+// The job processes in the department, in the order work flows between them.
+const PROCESSES = ['Designer', 'Planner', 'Engineer', 'Technician', 'Supervisor', 'Operator'];
+const EVERYONE = ['admin', 'planner', 'viewer'];
 
 const resources = {
   projects: {
@@ -171,6 +174,46 @@ const resources = {
       { name: 'status', label: 'Status', type: 'select', options: ['Open', 'Closed'], default: 'Open' },
     ],
   },
+  daily_logs: {
+    label: 'Daily log', singular: 'Activity', group: 'Daily work',
+    // Everyone records their own work; only Admin can change someone else's entry.
+    write: EVERYONE, ownerField: 'logged_by',
+    display: 'activity',
+    fields: [
+      { name: 'date', label: 'Date', type: 'date', required: true },
+      { name: 'process', label: 'Process', type: 'select', options: PROCESSES, required: true },
+      { name: 'project_id', label: 'Project', type: 'ref', ref: 'projects' },
+      { name: 'part_no', label: 'Part number', type: 'text' },
+      { name: 'activity', label: 'Activity', type: 'textarea', required: true },
+      { name: 'hours', label: 'Hours', type: 'number' },
+      { name: 'status', label: 'Status', type: 'select', options: ['Planned', 'In progress', 'Done', 'Blocked'], default: 'In progress' },
+      { name: 'handover_to', label: 'Hand over to', type: 'select', options: PROCESSES, help: 'The next process that needs this information.' },
+      { name: 'handover_note', label: 'Handover note', type: 'textarea', list: false },
+      { name: 'logged_by', label: 'Logged by', type: 'text', readonly: true },
+    ],
+  },
+  issues: {
+    label: 'Issues', singular: 'Issue', group: 'Daily work',
+    write: EVERYONE,
+    display: 'issue_no',
+    fields: [
+      { name: 'issue_no', label: 'Issue no.', type: 'text', readonly: true, unique: true },
+      { name: 'title', label: 'Problem', type: 'text', required: true },
+      { name: 'from_process', label: 'Raised by process', type: 'select', options: PROCESSES, required: true },
+      { name: 'to_process', label: 'Needs action from', type: 'select', options: PROCESSES, required: true },
+      { name: 'project_id', label: 'Project', type: 'ref', ref: 'projects' },
+      { name: 'part_no', label: 'Part number', type: 'text' },
+      { name: 'priority', label: 'Priority', type: 'select', options: ['Low', 'Normal', 'High', 'Urgent'], default: 'Normal' },
+      { name: 'status', label: 'Status', type: 'select', options: ['Open', 'In progress', 'Resolved', 'Closed'], default: 'Open' },
+      { name: 'opened', label: 'Opened', type: 'date' },
+      { name: 'due_date', label: 'Due date', type: 'date' },
+      { name: 'resolved', label: 'Resolved', type: 'date' },
+      { name: 'details', label: 'What happened', type: 'textarea', list: false },
+      { name: 'action_plan', label: 'Action plan', type: 'textarea', list: false },
+      { name: 'resolution', label: 'Solution', type: 'textarea', list: false },
+      { name: 'raised_by', label: 'Raised by', type: 'text', readonly: true },
+    ],
+  },
 };
 
 const SYSTEM_TYPES = { number: 'REAL', ref: 'INTEGER' };
@@ -179,4 +222,4 @@ function columnType(field) {
   return SYSTEM_TYPES[field.type] || 'TEXT';
 }
 
-module.exports = { resources, columnType, MACHINE_TYPES, MATERIALS };
+module.exports = { resources, columnType, MACHINE_TYPES, MATERIALS, PROCESSES };

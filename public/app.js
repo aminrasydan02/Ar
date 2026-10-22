@@ -44,15 +44,29 @@ const STATUS_CLASS = {
   'Completed': 'ok', 'Done': 'ok', 'Closed': 'ok', 'Running': 'ok', 'Current': 'ok', 'Good': 'ok',
   'In progress': 'warn', 'Open': 'warn', 'Maintenance': 'warn', 'Worn': 'warn', 'On hold': 'warn', 'Idle': 'info', 'Planned': 'info',
   'Down': 'bad', 'Damaged': 'bad', 'Cancelled': 'bad', 'Superseded': '', 'Scrapped': 'bad', 'Breakdown': 'bad',
+  'Blocked': 'bad', 'Resolved': 'ok', 'Urgent': 'bad', 'High': 'warn',
 };
 const pill = (v) => h('span', { class: `pill ${STATUS_CLASS[v] ?? ''}` }, v);
 
 function cellValue(field, row) {
   const v = field.type === 'ref' ? row[`${field.name}__label`] : row[field.name];
   if (v === null || v === undefined || v === '') return '';
-  if (field.name === 'status' || field.name === 'condition' || field.name === 'kind') return pill(v);
+  if (['status', 'condition', 'kind', 'priority'].includes(field.name)) return pill(v);
   if (field.type === 'number') return Number(v).toLocaleString();
   return String(v);
+}
+
+function localToday() {
+  const d = new Date();
+  return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+}
+
+// A new daily log or issue starts with today's date and the user's own process.
+function userPreset(resName) {
+  const p = state.user.process || '';
+  if (resName === 'daily_logs') return { date: localToday(), process: p };
+  if (resName === 'issues') return { opened: localToday(), from_process: p };
+  return {};
 }
 
 const right = (res, action) => !!(state.rights && state.rights[res] && state.rights[res][action]);
@@ -106,8 +120,9 @@ function openModal(title, body, buttons) {
 async function editRecord(resName, row, preset, onSaved) {
   const res = state.meta.resources[resName];
   const isNew = !row;
-  const editable = isNew ? right(resName, 'create') : right(resName, 'update');
-  const values = { ...(preset || {}), ...(row || {}) };
+  const ownedByOther = !isNew && res.ownerField && state.user.role !== 'admin' && row[res.ownerField] !== state.user.username;
+  const editable = isNew ? right(resName, 'create') : right(resName, 'update') && !ownedByOther;
+  const values = { ...(isNew ? userPreset(resName) : {}), ...(preset || {}), ...(row || {}) };
   if (isNew) for (const f of res.fields) if (values[f.name] === undefined && f.default !== undefined) values[f.name] = f.default;
 
   const err = h('div');
@@ -148,6 +163,12 @@ async function editRecord(resName, row, preset, onSaved) {
         catch (e) { err.replaceChildren(h('div', { class: 'msg err' }, e.message)); }
       } }, 'Delete') : null,
       !isNew && resName === 'ncrs' ? h('a', { class: 'btn left', href: `#/ncr/${row.id}/print` , onclick: close }, 'Print / PDF') : null,
+      !isNew && resName === 'issues' ? h('a', { class: 'btn left', href: `#/issue/${row.id}`, onclick: close }, 'Open discussion') : null,
+      !isNew && resName === 'daily_logs' && right('issues', 'create') ? h('button', { class: 'btn left', onclick: () => {
+        close();
+        editRecord('issues', null, { title: row.activity.split('\n')[0].slice(0, 120), project_id: row.project_id, part_no: row.part_no,
+          from_process: row.process, to_process: row.handover_to || '', details: row.handover_note || row.activity }, (saved) => { if (saved) location.hash = `#/issue/${saved.id}`; });
+      } }, 'Raise issue') : null,
       h('button', { class: 'btn', onclick: close }, editable ? 'Cancel' : 'Close'),
       editable ? h('button', { class: 'btn primary', onclick: () => save(close) }, 'Save') : null,
     ]);
@@ -203,7 +224,9 @@ async function viewDashboard() {
     h('div', { class: 'kpis' },
       tile(k.active_projects, 'Active projects'), tile(k.parts, 'Parts'), tile(k.total_pcs, 'Total pieces'),
       tile(k.drawings, 'Current drawings'), tile(k.open_ncrs, 'Open NCRs', true), tile(k.open_work_orders, 'Open maintenance', true),
-      tile(k.machines_down, 'Machines down', true), tile(k.low_stock, 'Plates at/below minimum', true)),
+      tile(k.machines_down, 'Machines down', true), tile(k.low_stock, 'Plates at/below minimum', true),
+      tile(k.logs_today, 'Activities logged today'), tile(k.open_issues, 'Open issues', true)),
+    d.issues.length ? [h('h2', {}, 'Open issues'), issueTable(d.issues)] : null,
     h('h2', {}, 'Projects'),
     d.projects.length ? h('div', { class: 'table-wrap' }, h('table', {},
       h('thead', {}, h('tr', {}, ['Project', 'Name', 'Customer', 'Due', 'Status', 'Parts', 'Progress'].map((t) => h('th', {}, t)))),
@@ -249,6 +272,7 @@ function viewList(resName) {
   if (resName === 'parts') opts.rowActions = workflowButton;
   if (resName === 'projects') opts.rowActions = (r) => h('a', { class: 'btn small', href: `#/project/${r.id}` }, 'Open');
   if (resName === 'ncrs') opts.rowActions = (r) => h('a', { class: 'btn small', href: `#/ncr/${r.id}/print` }, 'Print');
+  if (resName === 'issues') opts.rowActions = (r) => h('a', { class: 'btn small', href: `#/issue/${r.id}` }, 'Discuss');
   return [h('h1', {}, res.label), recordTable(resName, opts)];
 }
 
@@ -409,21 +433,127 @@ async function viewNcrPrint(id) {
   ];
 }
 
+// ---------- daily work -------------------------------------------------------
+
+function issueTable(rows) {
+  return h('div', { class: 'table-wrap' }, h('table', {},
+    h('thead', {}, h('tr', {}, ['Issue', 'Problem', 'From → To', 'Priority', 'Status', 'Opened', 'Due'].map((t) => h('th', {}, t)))),
+    h('tbody', {}, rows.map((i) => h('tr', { class: 'click', onclick: () => { location.hash = `#/issue/${i.id}`; } },
+      h('td', {}, i.issue_no), h('td', { class: 'wrap' }, i.title), h('td', {}, `${i.from_process} → ${i.to_process}`),
+      h('td', {}, pill(i.priority)), h('td', {}, pill(i.status)), h('td', {}, i.opened || ''), h('td', {}, i.due_date || ''))))));
+}
+
+// One column per process, in the order work passes from design to the shop floor.
+async function viewDaily(dateArg) {
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(dateArg || '') ? dateArg : localToday();
+  const [logs, issues] = await Promise.all([
+    api('GET', `/api/daily_logs?date=${date}`),
+    api('GET', '/api/issues'),
+  ]);
+  const open = issues.filter((i) => i.status === 'Open' || i.status === 'In progress');
+  const reload = () => route();
+  const shift = (days) => {
+    const d = new Date(`${date}T12:00:00Z`);
+    d.setUTCDate(d.getUTCDate() + days);
+    location.hash = `#/daily/${d.toISOString().slice(0, 10)}`;
+  };
+  const picker = h('input', { type: 'date', value: date });
+  picker.addEventListener('change', () => { if (picker.value) location.hash = `#/daily/${picker.value}`; });
+
+  const columns = state.meta.processes.map((proc) => {
+    const mine = logs.filter((l) => l.process === proc);
+    const waiting = open.filter((i) => i.to_process === proc);
+    const incoming = logs.filter((l) => l.handover_to === proc && l.process !== proc);
+    return h('section', { class: `lane${state.user.process === proc ? ' me' : ''}` },
+      h('header', {}, h('strong', {}, proc), h('span', { class: 'muted' }, `${mine.length} logged`)),
+      waiting.length ? h('a', { class: 'lane-alert', href: '#/r/issues' }, `${waiting.length} open issue${waiting.length === 1 ? '' : 's'} waiting`) : null,
+      incoming.map((l) => h('div', { class: 'card handover', onclick: () => editRecord('daily_logs', l, null, reload) },
+        h('div', { class: 'muted small' }, `From ${l.process} · ${l.logged_by || ''}`),
+        h('div', {}, l.handover_note || l.activity))),
+      mine.map((l) => h('div', { class: 'card', onclick: () => editRecord('daily_logs', l, null, reload) },
+        h('div', { class: 'card-top' }, pill(l.status), l.hours ? h('span', { class: 'muted small' }, `${l.hours} h`) : null),
+        h('div', { class: 'act' }, l.activity),
+        h('div', { class: 'muted small' }, [l.project_id__label, l.part_no].filter(Boolean).join(' · ')),
+        h('div', { class: 'muted small' }, l.logged_by || '', l.handover_to ? ` → ${l.handover_to}` : ''))),
+      !mine.length && !incoming.length ? h('div', { class: 'muted small empty-lane' }, 'Nothing logged') : null);
+  });
+
+  return [
+    h('div', { class: 'toolbar' },
+      h('h1', { class: 'grow' }, 'Daily board'),
+      h('button', { class: 'btn', onclick: () => shift(-1) }, '‹ Previous day'), picker,
+      h('button', { class: 'btn', onclick: () => shift(1) }, 'Next day ›'),
+      date !== localToday() ? h('a', { class: 'btn', href: '#/daily' }, 'Today') : null,
+      right('issues', 'create') ? h('button', { class: 'btn', onclick: () => editRecord('issues', null, null, reload) }, '! Raise issue') : null,
+      right('daily_logs', 'create') ? h('button', { class: 'btn primary', onclick: () => editRecord('daily_logs', null, { date }, reload) }, '+ Log activity') : null),
+    state.user.process ? null : h('div', { class: 'msg warn' }, 'Your account has no process yet. Ask Admin to set it under Users so your entries go to the right column.'),
+    h('div', { class: 'lanes' }, columns),
+    h('h2', {}, `Open issues (${open.length})`),
+    open.length ? issueTable(open) : h('div', { class: 'panel muted' }, 'No open issues.'),
+  ];
+}
+
+async function viewIssue(id) {
+  const [issue, replies] = await Promise.all([api('GET', `/api/issues/${id}`), api('GET', `/api/issues/${id}/replies`)]);
+  const reload = () => route();
+  const field = (label, value) => value ? h('div', { class: 'full' }, h('div', { class: 'muted small' }, label), h('div', { class: 'pre' }, value)) : null;
+  const box = h('textarea', { placeholder: 'Write an update, a question or the solution…' });
+  const err = h('div');
+  async function postReply() {
+    try {
+      await api('POST', `/api/issues/${id}/replies`, { message: box.value });
+      reload();
+    } catch (e) { err.replaceChildren(h('div', { class: 'msg err' }, e.message)); }
+  }
+  async function setStatus(status) {
+    try { await api('PUT', `/api/issues/${id}`, { status }); toast(`Issue ${status.toLowerCase()}`); reload(); }
+    catch (e) { toast(e.message, true); }
+  }
+  const canEdit = right('issues', 'update');
+  return [
+    h('div', { class: 'toolbar' },
+      h('h1', { class: 'grow' }, `${issue.issue_no} — ${issue.title}`),
+      h('a', { class: 'btn', href: '#/daily' }, 'Daily board'),
+      h('button', { class: 'btn', onclick: () => editRecord('issues', issue, null, reload) }, canEdit ? 'Edit' : 'Details'),
+      canEdit && issue.status === 'Open' ? h('button', { class: 'btn', onclick: () => setStatus('In progress') }, 'Start working') : null,
+      canEdit && ['Open', 'In progress'].includes(issue.status) ? h('button', { class: 'btn primary', onclick: () => setStatus('Resolved') }, 'Mark resolved') : null,
+      canEdit && issue.status === 'Resolved' ? h('button', { class: 'btn', onclick: () => setStatus('Closed') }, 'Close') : null),
+    h('div', { class: 'panel' },
+      h('div', { class: 'kpis' },
+        [['From', issue.from_process], ['Needs action from', issue.to_process], ['Project', issue.project_id__label], ['Part', issue.part_no],
+          ['Opened', issue.opened], ['Due', issue.due_date], ['Resolved', issue.resolved], ['Raised by', issue.raised_by]]
+          .map(([l, v]) => h('div', {}, h('div', { class: 'muted' }, l), h('div', {}, v || '—'))),
+        h('div', {}, h('div', { class: 'muted' }, 'Priority'), pill(issue.priority)),
+        h('div', {}, h('div', { class: 'muted' }, 'Status'), pill(issue.status))),
+      h('div', { class: 'form gap-top' },
+        field('What happened', issue.details), field('Action plan', issue.action_plan), field('Solution', issue.resolution))),
+    h('h2', {}, `Discussion (${replies.length})`),
+    h('div', { class: 'thread' },
+      replies.length ? replies.map((r) => h('div', { class: `reply${r.username === state.user.username ? ' mine' : ''}` },
+        h('div', { class: 'muted small' }, r.username, r.process ? ` · ${r.process}` : '', ` · ${r.at} UTC`),
+        h('div', { class: 'pre' }, r.message))) : h('div', { class: 'panel muted' }, 'No replies yet. Use this to ask questions and share updates between processes.')),
+    canEdit ? h('div', { class: 'panel reply-box' }, err, box,
+      h('div', { class: 'toolbar reply-actions' }, h('span', { class: 'grow' }),
+        h('button', { class: 'btn primary', onclick: postReply }, 'Post reply'))) : null,
+  ];
+}
+
 async function viewUsers() {
   const box = h('div');
   async function load() {
     const users = await api('GET', '/api/users');
     box.replaceChildren(h('div', { class: 'table-wrap' }, h('table', {},
-      h('thead', {}, h('tr', {}, ['Username', 'Name', 'Role', 'Active', 'Created'].map((t) => h('th', {}, t)))),
+      h('thead', {}, h('tr', {}, ['Username', 'Name', 'Role', 'Process', 'Active', 'Created'].map((t) => h('th', {}, t)))),
       h('tbody', {}, users.map((u) => h('tr', { class: 'click', onclick: () => userForm(u, load) },
-        h('td', {}, u.username), h('td', {}, u.full_name || ''), h('td', {}, h('span', { class: 'role' }, u.role)),
+        h('td', {}, u.username), h('td', {}, u.full_name || ''), h('td', {}, h('span', { class: 'role' }, u.role)), h('td', {}, u.process || ''),
         h('td', {}, u.active ? h('span', { class: 'pill ok' }, 'Active') : h('span', { class: 'pill bad' }, 'Disabled')),
         h('td', {}, u.created_at)))))));
   }
   await load();
   return [
     h('div', { class: 'toolbar' }, h('h1', { class: 'grow' }, 'Users'), h('button', { class: 'btn primary', onclick: () => userForm(null, load) }, '+ New user')),
-    h('p', { class: 'muted' }, 'Admin: everything. Planner: view all, create and update projects, parts, routing and nesting, upload drawings, export; cannot delete. Viewer: view and export only.'),
+    h('p', { class: 'muted' }, 'Admin: everything. Planner: view all, create and update projects, parts, routing and nesting, upload drawings, export; cannot delete. Viewer: view and export. Everyone can write their daily log, raise issues and reply to them.'),
+    h('p', { class: 'muted' }, `Process is the person's job (${state.meta.processes.join(', ')}). New daily log entries and issues start with it.`),
     box,
   ];
 }
@@ -434,6 +564,8 @@ function userForm(u, reload) {
     h('div', {}, h('label', {}, 'Username'), u ? h('div', { class: 'ro' }, u.username) : h('input', { type: 'text', name: 'username', required: true })),
     h('div', {}, h('label', {}, 'Full name'), h('input', { type: 'text', name: 'full_name', value: u ? u.full_name : '' })),
     h('div', {}, h('label', {}, 'Role'), h('select', { name: 'role' }, state.meta.roles.map((r) => h('option', { value: r, selected: u ? u.role === r : r === 'viewer' }, r)))),
+    h('div', {}, h('label', {}, 'Process'), h('select', { name: 'process' }, h('option', { value: '' }, ''),
+      state.meta.processes.map((p) => h('option', { value: p, selected: u ? u.process === p : false }, p)))),
     h('div', {}, h('label', {}, u ? 'New password (leave empty to keep)' : 'Password (8+ characters)'), h('input', { type: 'password', name: 'password', autocomplete: 'new-password' })),
     u ? h('div', {}, h('label', {}, h('input', { type: 'checkbox', name: 'active', checked: u.active }), ' Active')) : null);
   f.addEventListener('submit', (e) => e.preventDefault());
@@ -444,7 +576,7 @@ function userForm(u, reload) {
     } }, 'Delete') : null,
     h('button', { class: 'btn', onclick: close }, 'Cancel'),
     h('button', { class: 'btn primary', onclick: async () => {
-      const body = { full_name: f.elements.full_name.value, role: f.elements.role.value };
+      const body = { full_name: f.elements.full_name.value, role: f.elements.role.value, process: f.elements.process.value };
       if (f.elements.password.value) body.password = f.elements.password.value;
       try {
         if (u) { body.active = f.elements.active.checked; await api('PUT', `/api/users/${u.id}`, body); }
@@ -480,7 +612,8 @@ function viewAccount() {
     } catch (err) { msg.replaceChildren(h('div', { class: 'msg err' }, err.message)); }
   });
   return [h('h1', {}, 'My account'),
-    h('p', {}, `Signed in as ${state.user.username}`, h('span', { class: 'role' }, state.user.role)),
+    h('p', {}, `Signed in as ${state.user.username}`, h('span', { class: 'role' }, state.user.role),
+      state.user.process ? h('span', { class: 'role' }, state.user.process) : null),
     msg, f];
 }
 
@@ -513,15 +646,18 @@ function renderShell() {
     (groups[r.group] = groups[r.group] || []).push([`#/r/${name}`, r.label]);
   }
   groups.Engineering = [['#/drawings', 'Drawings'], ...(groups.Engineering || [])];
+  const daily = [['#/daily', 'Daily board'], ...(groups['Daily work'] || [])];
+  delete groups['Daily work'];
   const nav = h('nav', { class: 'side', id: 'side' },
     h('div', { class: 'brand' }, h('img', { src: 'icon.svg', alt: '' }), 'Sheet Metal Manager'),
     h('a', { href: '#/' }, 'Dashboard'),
-    Object.entries(groups).map(([g, links]) => [h('h4', {}, g), links.map(([href, label]) => h('a', { href }, label))]),
+    Object.entries({ 'Daily work': daily, ...groups }).map(([g, links]) => [h('h4', {}, g), links.map(([href, label]) => h('a', { href }, label))]),
     state.user.role === 'admin' ? [h('h4', {}, 'Admin'), h('a', { href: '#/users' }, 'Users'), h('a', { href: '#/audit' }, 'Activity log')] : null,
     h('h4', {}, 'Account'), h('a', { href: '#/account' }, 'My account'));
   const top = h('div', { class: 'top' },
     h('button', { class: 'btn menu-btn', onclick: () => nav.classList.toggle('open') }, '☰'),
-    h('span', { class: 'who' }, state.user.full_name || state.user.username, h('span', { class: 'role' }, state.user.role)),
+    h('span', { class: 'who' }, state.user.full_name || state.user.username, h('span', { class: 'role' }, state.user.role),
+      state.user.process ? h('span', { class: 'role' }, state.user.process) : null),
     h('span', {}, h('span', { class: 'muted' }, `v${state.version} `),
       h('button', { class: 'btn', onclick: async () => { await api('POST', '/api/logout'); state.user = null; history.replaceState(null, '', '#/'); renderLogin(); } }, 'Sign out')));
   document.getElementById('app').replaceChildren(h('div', { class: 'shell' }, nav, h('div', { class: 'main' }, top, h('div', { class: 'content', id: 'content' }))));
@@ -539,6 +675,8 @@ async function route() {
     if (!a) view = await viewDashboard();
     else if (a === 'r') view = viewList(b);
     else if (a === 'drawings') view = viewDrawings();
+    else if (a === 'daily') view = await viewDaily(b);
+    else if (a === 'issue') view = await viewIssue(Number(b));
     else if (a === 'project') view = await viewProject(Number(b));
     else if (a === 'ncr' && c === 'print') view = await viewNcrPrint(Number(b));
     else if (a === 'users') view = await viewUsers();

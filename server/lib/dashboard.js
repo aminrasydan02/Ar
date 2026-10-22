@@ -16,7 +16,16 @@ function buildDashboard(db) {
     machines_down: one("SELECT COUNT(*) AS n FROM machines WHERE status IN ('Down','Maintenance')").n,
     low_stock: one('SELECT COUNT(*) AS n FROM plates WHERE qty <= min_qty').n,
     drawings: one("SELECT COUNT(*) AS n FROM drawings WHERE status = 'Current'").n,
+    logs_today: one("SELECT COUNT(*) AS n FROM daily_logs WHERE date = date('now','localtime')").n,
+    open_issues: one("SELECT COUNT(*) AS n FROM issues WHERE status IN ('Open','In progress')").n,
   };
+
+  // Open problems, most urgent first, so each process sees what is waiting on it.
+  const issues = all(`
+    SELECT id, issue_no, title, from_process, to_process, priority, status, opened, due_date
+    FROM issues WHERE status IN ('Open','In progress')
+    ORDER BY CASE priority WHEN 'Urgent' THEN 0 WHEN 'High' THEN 1 WHEN 'Normal' THEN 2 ELSE 3 END, opened
+    LIMIT 20`);
 
   const projects = all(`
     SELECT p.id, p.code, p.name, p.customer, p.due_date, p.status,
@@ -69,7 +78,7 @@ function buildDashboard(db) {
   const lowStock = all('SELECT material, thickness, sheet_size, qty, min_qty FROM plates WHERE qty <= min_qty ORDER BY material, thickness');
   const recentNcrs = all('SELECT id, ncr_no, date, part_no, status FROM ncrs ORDER BY id DESC LIMIT 5');
 
-  return { kpi, projects, workflow, load, downtime, lowStock, recentNcrs, minutesPerDay: MINUTES_PER_DAY };
+  return { kpi, issues, projects, workflow, load, downtime, lowStock, recentNcrs, minutesPerDay: MINUTES_PER_DAY };
 }
 
 module.exports = { buildDashboard, MINUTES_PER_DAY };

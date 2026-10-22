@@ -198,3 +198,87 @@ test('static files are served and path traversal is refused', async () => {
   const t = await fetch(`${base}/..%2fpackage.json`);
   assert.equal(t.status, 404);
 });
+
+test('everyone logs daily work under their own process; only the writer or Admin can change it', async () => {
+  const bad = await call(admin, 'POST', '/api/users', { username: 'x1', role: 'viewer', process: 'Chef', password: 'password123' });
+  assert.equal(bad.status, 400);
+  const op = await call(admin, 'POST', '/api/users', { username: 'op1', role: 'viewer', process: 'Operator', password: 'password123' });
+  assert.equal(op.status, 201);
+  assert.equal(op.data.process, 'Operator');
+  const tech = await call(admin, 'POST', '/api/users', { username: 'tech1', role: 'viewer', password: 'password123' });
+  assert.equal((await call(admin, 'PUT', `/api/users/${tech.data.id}`, { process: 'Technician' })).data.process, 'Technician');
+  const opS = await login('op1', 'password123');
+  const techS = await login('tech1', 'password123');
+  assert.equal((await call(opS, 'GET', '/api/me')).data.user.process, 'Operator');
+
+  const log = await call(opS, 'POST', '/api/daily_logs', { activity: 'Bending BRK-1, 20 pcs', hours: 4, handover_to: 'Supervisor', logged_by: 'someone-else' });
+  assert.equal(log.status, 201);
+  assert.equal(log.data.process, 'Operator');
+  assert.equal(log.data.logged_by, 'op1');
+  assert.match(log.data.date, /^\d{4}-\d{2}-\d{2}$/);
+  assert.equal(log.data.status, 'In progress');
+
+  assert.equal((await call(opS, 'PUT', `/api/daily_logs/${log.data.id}`, { status: 'Done' })).data.status, 'Done');
+  assert.equal((await call(techS, 'PUT', `/api/daily_logs/${log.data.id}`, { status: 'Blocked' })).status, 403);
+  assert.equal((await call(planner, 'PUT', `/api/daily_logs/${log.data.id}`, { status: 'Blocked' })).status, 403);
+  assert.equal((await call(admin, 'PUT', `/api/daily_logs/${log.data.id}`, { hours: 5 })).data.hours, 5);
+  assert.equal((await call(opS, 'DELETE', `/api/daily_logs/${log.data.id}`)).status, 403);
+
+  const today = await call(techS, 'GET', `/api/daily_logs?date=${log.data.date}`);
+  assert.ok(today.data.some((l) => l.id === log.data.id));
+  assert.ok(today.data.some((l) => l.process === 'Designer'), 'demo day is on the board');
+
+  // Admin without a process must pick one.
+  assert.equal((await call(admin, 'POST', '/api/daily_logs', { activity: 'x' })).status, 400);
+});
+
+test('issues pass a problem between processes, with numbering, discussion and resolved date', async () => {
+  const opS = await login('op1', 'password123');
+  const techS = await login('tech1', 'password123');
+  const year = new Date().getFullYear();
+  const iss = await call(opS, 'POST', '/api/issues', { title: 'Press brake angle off by 2°', to_process: 'Technician', priority: 'Urgent' });
+  assert.equal(iss.status, 201);
+  assert.equal(iss.data.issue_no, `ISS-${year}-0002`);
+  assert.equal(iss.data.from_process, 'Operator');
+  assert.equal(iss.data.raised_by, 'op1');
+  assert.equal(iss.data.status, 'Open');
+  assert.ok(iss.data.opened);
+
+  const id = iss.data.id;
+  assert.equal((await call(techS, 'POST', `/api/issues/${id}/replies`, { message: '  ' })).status, 400);
+  const rep = await call(techS, 'POST', `/api/issues/${id}/replies`, { message: 'Recalibrating the back gauge now.' });
+  assert.equal(rep.status, 201);
+  assert.equal(rep.data.process, 'Technician');
+  await call(opS, 'POST', `/api/issues/${id}/replies`, { message: 'Thanks, holding the batch.' });
+  const thread = await call(planner, 'GET', `/api/issues/${id}/replies`);
+  assert.deepEqual(thread.data.map((r) => r.username), ['tech1', 'op1']);
+  assert.equal((await call(techS, 'GET', '/api/issues/99999/replies')).status, 404);
+
+  let d = await call(admin, 'GET', '/api/dashboard');
+  assert.equal(d.data.kpi.open_issues, 2);
+  assert.equal(d.data.issues[0].priority, 'Urgent');
+  assert.ok(d.data.kpi.logs_today >= 5);
+
+  const fixed = await call(techS, 'PUT', `/api/issues/${id}`, { status: 'Resolved', resolution: 'Back gauge recalibrated.' });
+  assert.equal(fixed.status, 200);
+  assert.match(fixed.data.resolved, /^\d{4}-\d{2}-\d{2}$/);
+  d = await call(admin, 'GET', '/api/dashboard');
+  assert.equal(d.data.kpi.open_issues, 1);
+  assert.equal((await call(techS, 'DELETE', `/api/issues/${id}`)).status, 403);
+  assert.equal((await call(admin, 'DELETE', `/api/issues/${id}`)).status, 204);
+  assert.equal(database.prepare('SELECT COUNT(*) AS n FROM issue_replies WHERE issue_id = ?').get(id).n, 0);
+});
+
+test('an older database gets the process column and discussion table', () => {
+  const file = path.join(tmp, 'old.sqlite');
+  const { DatabaseSync } = require('node:sqlite');
+  const old = new DatabaseSync(file);
+  old.exec(`CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE, full_name TEXT,
+    role TEXT NOT NULL, password_hash TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+  old.close();
+  const upgraded = db.open(file);
+  const cols = upgraded.prepare('PRAGMA table_info(users)').all().map((c) => c.name);
+  assert.ok(cols.includes('process'));
+  assert.ok(upgraded.prepare("SELECT name FROM sqlite_master WHERE name = 'issue_replies'").get());
+  upgraded.close();
+});

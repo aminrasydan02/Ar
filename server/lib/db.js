@@ -5,7 +5,7 @@ const { DatabaseSync } = require('node:sqlite');
 const { resources, columnType } = require('./resources');
 const { hashPassword } = require('./auth');
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 function open(file) {
   if (file !== ':memory:') fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -63,6 +63,18 @@ function migrate(db) {
       db.exec(`CREATE INDEX IF NOT EXISTS ix_${name}_${f.name} ON ${name}(${f.name})`);
     }
   }
+  // Version 2: each user has a job process, and issues have a discussion thread.
+  const userCols = new Set(db.prepare('PRAGMA table_info(users)').all().map((c) => c.name));
+  if (!userCols.has('process')) db.exec('ALTER TABLE users ADD COLUMN process TEXT');
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS issue_replies (
+      id INTEGER PRIMARY KEY,
+      issue_id INTEGER NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+      at TEXT NOT NULL DEFAULT (datetime('now')),
+      username TEXT, process TEXT, message TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS ix_issue_replies_issue ON issue_replies(issue_id);
+  `);
   db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run('schema_version', String(SCHEMA_VERSION));
 }
 
