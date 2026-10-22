@@ -76,6 +76,8 @@ function buildDashboard(db) {
   });
 
   const lowStock = all('SELECT material, thickness, sheet_size, qty, min_qty FROM plates WHERE qty <= min_qty ORDER BY material, thickness');
+  const lowItems = all(`SELECT id, code, name, item_group, location, qty_on_hand, min_qty, unit, status FROM inventory_items
+    WHERE status IN ('Low', 'Out') ORDER BY status DESC, code`);
   // Work still open per shop process, from Job Traveller routing and Operator output.
   const processes = all(`
     SELECT p.id, p.name, p.seq,
@@ -111,7 +113,7 @@ function buildDashboard(db) {
 
   const recentNcrs = all('SELECT id, ncr_no, date, part_no, status FROM ncrs ORDER BY id DESC LIMIT 5');
 
-  return { kpi, production, processes, issues, projects, workflow, load, downtime, lowStock, recentNcrs, minutesPerDay: MINUTES_PER_DAY };
+  return { kpi, production, processes, issues, projects, workflow, load, downtime, lowStock, lowItems, recentNcrs, minutesPerDay: MINUTES_PER_DAY };
 }
 
 module.exports = { buildDashboard, MINUTES_PER_DAY };

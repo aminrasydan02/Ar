@@ -476,3 +476,35 @@ test('each process edits only its own data; Manager reads all and approves Job T
   assert.equal((await call(mgr, 'GET', '/api/me')).data.user.theme, 'dark');
   assert.equal((await call(mgr, 'POST', '/api/me/theme', { theme: 'pink' })).status, 400);
 });
+
+test('inventory: stock moves update qty on hand, low stock shows, no negative stock', async () => {
+  const machine = (await call(admin, 'GET', '/api/machines')).data[0];
+  let r = await call(admin, 'POST', '/api/inventory_items', { code: 'T-GLV', name: 'Cut-resistant gloves', item_group: 'Operator tools', unit: 'pair', qty_on_hand: 20, min_qty: 10 });
+  assert.equal(r.status, 201);
+  assert.equal(r.data.status, 'OK');
+  const glove = r.data;
+  const op = await login('op1', 'password123');
+  r = await call(op, 'POST', '/api/inventory_moves', { date: '2026-10-22', item_id: glove.id, move: 'Issue / use', qty: 12 });
+  assert.equal(r.status, 201);
+  assert.equal(r.data.process, 'Operator');
+  let item = (await call(op, 'GET', `/api/inventory_items/${glove.id}`)).data;
+  assert.equal(item.qty_on_hand, 8);
+  assert.equal(item.status, 'Low');
+  r = await call(op, 'POST', '/api/inventory_moves', { date: '2026-10-22', item_id: glove.id, move: 'Issue / use', qty: 9 });
+  assert.equal(r.status, 400);
+  assert.match(r.data.error, /Not enough stock/);
+  assert.equal((await call(op, 'POST', '/api/inventory_items', { code: 'X', name: 'x', item_group: 'Equipment' })).status, 403);
+  const spare = (await call(admin, 'POST', '/api/inventory_items', { code: 'T-BRG', name: 'Bearing 6204', item_group: 'Maintenance spares', qty_on_hand: 2, min_qty: 1 })).data;
+  const wo = (await call(admin, 'POST', '/api/maint_orders', { machine_id: machine.id, kind: 'Breakdown', title: 'Spindle noise' })).data;
+  r = await call(admin, 'POST', '/api/inventory_moves', { date: '2026-10-22', item_id: spare.id, move: 'Issue / use', qty: 2, maint_order_id: wo.id, machine_id: machine.id });
+  assert.equal(r.status, 201);
+  item = (await call(admin, 'GET', `/api/inventory_items/${spare.id}`)).data;
+  assert.equal(item.status, 'Out');
+  assert.equal((await call(admin, 'PUT', `/api/inventory_moves/${r.data.id}`, { qty: 1 })).status, 400);
+  const dash = (await call(admin, 'GET', '/api/dashboard')).data;
+  assert.ok(['T-BRG', 'T-GLV'].every((c) => dash.lowItems.some((i) => i.code === c)));
+  item = (await call(admin, 'PUT', `/api/inventory_items/${glove.id}`, { qty_on_hand: 30 })).data;
+  assert.equal(item.status, 'OK');
+  const log = (await call(admin, 'GET', `/api/inventory_moves?item_id=${glove.id}`)).data;
+  assert.deepEqual(log.map((m) => m.move), ['Adjust', 'Issue / use', 'Receive']);
+});

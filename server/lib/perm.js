@@ -10,6 +10,11 @@ const { resources } = require('./resources');
 
 const ROLES = ['admin', 'planner', 'viewer'];
 
+function mayWrite(res, role, process, roles) {
+  if (process && res.processes) return res.processes.includes(process) && (role !== 'viewer' || res.write.includes(role));
+  return roles.includes(role);
+}
+
 function can(who, action, resourceName) {
   const role = typeof who === 'string' ? who : who && who.role;
   const process = typeof who === 'string' ? null : who && who.process;
@@ -23,11 +28,11 @@ function can(who, action, resourceName) {
     case 'export':
       return true;
     case 'create':
-      return !res.noCreate && can(who, 'update', resourceName);
+      return !res.noCreate && mayWrite(res, role, process, res.write);
     case 'update':
+      return !res.noUpdate && mayWrite(res, role, process, res.write);
     case 'upload':
-      if (process && res.processes) return res.processes.includes(process) && (role !== 'viewer' || res.write.includes(role));
-      return (action === 'upload' ? res.upload || [] : res.write).includes(role);
+      return mayWrite(res, role, process, res.upload || []);
     case 'delete':
       return false;
     default:

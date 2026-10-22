@@ -2,7 +2,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { resources, PROCESSES } = require('./resources');
+const { resources, PROCESSES, MOVE_SIGN } = require('./resources');
 const { ROLES, can, rightsFor, canApprove } = require('./perm');
 const auth = require('./auth');
 const { FORMATS, MODEL_FORMATS, MIME, parseDrawingName, safeFilename, checkContent } = require('./drawings');
@@ -199,7 +199,35 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
     return out;
   }
 
+  // ---- inventory stock ----------------------------------------------------
+  const stockStatus = (qty, min) => (qty <= 0 ? 'Out' : qty <= (min || 0) ? 'Low' : 'OK');
+  function setStock(itemId, qty) {
+    const item = db.prepare('SELECT min_qty FROM inventory_items WHERE id = ?').get(itemId);
+    db.prepare("UPDATE inventory_items SET qty_on_hand = ?, status = ?, updated_at = datetime('now') WHERE id = ?").run(qty, stockStatus(qty, item.min_qty), itemId);
+  }
+  function logMove(itemId, move, qty, user, remark) {
+    db.prepare('INSERT INTO inventory_moves (date, item_id, move, qty, process, remark, moved_by) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run(localToday(), itemId, move, qty, user.process || null, remark, user.username);
+  }
+  // How much a movement changes the stock, refusing to go below zero.
+  function moveDelta(data) {
+    const item = db.prepare('SELECT * FROM inventory_items WHERE id = ?').get(data.item_id);
+    if (!item) throw new HttpError(400, 'Item not found');
+    const sign = MOVE_SIGN[data.move];
+    if (sign !== 0 && !(data.qty > 0)) throw new HttpError(400, 'Qty must be more than 0');
+    const delta = sign === 0 ? data.qty : sign * data.qty;
+    if ((item.qty_on_hand || 0) + delta < 0) throw new HttpError(400, `Not enough stock: ${item.qty_on_hand || 0} ${item.unit || ''} of ${item.code} on hand`);
+    return { item, delta };
+  }
+
   function createRecord(name, data, user) {
+    let stock = null;
+    if (name === 'inventory_moves') {
+      stock = moveDelta(data);
+      data.moved_by = user.username;
+      if (!data.process && user.process) data.process = user.process;
+    }
+    if (name === 'inventory_items') data.status = stockStatus(data.qty_on_hand || 0, data.min_qty);
     if (name === 'ncrs') data.ncr_no = nextNumber('ncrs', 'ncr_no', 'NCR', data.date);
     if (name === 'issues') {
       data.issue_no = nextNumber('issues', 'issue_no', 'ISS', data.opened);
@@ -214,6 +242,8 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
       const r = db.prepare(`INSERT INTO ${name} (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
         .run(...cols.map((c) => data[c]));
       const id = Number(r.lastInsertRowid);
+      if (stock) setStock(stock.item.id, (stock.item.qty_on_hand || 0) + stock.delta);
+      if (name === 'inventory_items' && data.qty_on_hand > 0) logMove(id, 'Receive', data.qty_on_hand, user, 'Opening stock');
       audit(user, 'create', name, id);
       return getRecord(name, id);
     } catch (err) { throw friendlyDbError(err); }
@@ -226,6 +256,13 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
       throw new HttpError(403, `Only ${current[owner] || 'the person who wrote it'} or Admin can change this ${resources[name].singular.toLowerCase()}`);
     }
     if (name === 'issues' && ['Resolved', 'Closed'].includes(data.status) && !current.resolved && !data.resolved) data.resolved = localToday();
+    if (name === 'inventory_moves') throw new HttpError(400, 'A stock movement cannot be changed. Record an Adjust instead');
+    if (name === 'inventory_items') {
+      const qty = data.qty_on_hand ?? current.qty_on_hand ?? 0;
+      if (qty < 0) throw new HttpError(400, 'Qty on hand cannot be below 0');
+      if (qty !== (current.qty_on_hand ?? 0)) logMove(id, 'Adjust', qty - (current.qty_on_hand ?? 0), user, 'Stock count');
+      data.status = stockStatus(qty, data.min_qty ?? current.min_qty);
+    }
     const cols = Object.keys(data);
     if (cols.length) {
       try {
@@ -240,6 +277,11 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
   function deleteRecord(name, id, user) {
     const row = db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(id);
     if (!row) throw new HttpError(404, 'Not found');
+    if (name === 'inventory_moves') {
+      const item = db.prepare('SELECT qty_on_hand FROM inventory_items WHERE id = ?').get(row.item_id);
+      const sign = MOVE_SIGN[row.move];
+      if (item) setStock(row.item_id, Math.max(0, (item.qty_on_hand || 0) - (sign === 0 ? row.qty : sign * row.qty)));
+    }
     db.prepare(`DELETE FROM ${name} WHERE id = ?`).run(id);
     if (name === 'drawings' && row.stored_name) fs.rmSync(path.join(drawingsDir, row.stored_name), { force: true });
     audit(user, 'delete', name, id);

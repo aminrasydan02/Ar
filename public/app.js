@@ -44,7 +44,7 @@ const STATUS_CLASS = {
   'Completed': 'ok', 'Done': 'ok', 'Closed': 'ok', 'Running': 'ok', 'Current': 'ok', 'Good': 'ok',
   'In progress': 'warn', 'Open': 'warn', 'Maintenance': 'warn', 'Worn': 'warn', 'On hold': 'warn', 'Idle': 'info', 'Planned': 'info',
   'Down': 'bad', 'Damaged': 'bad', 'Cancelled': 'bad', 'Superseded': '', 'Scrapped': 'bad', 'Breakdown': 'bad',
-  'Blocked': 'bad', 'Resolved': 'ok', 'Urgent': 'bad', 'High': 'warn', 'Pending': '', '3D model': 'info', 'Drawing': '', 'Image': '',
+  'Blocked': 'bad', 'Resolved': 'ok', 'Urgent': 'bad', 'High': 'warn', 'Pending': '', '3D model': 'info', 'OK': 'ok', 'Low': 'warn', 'Out': 'bad', 'Drawing': '', 'Image': '',
 };
 const pill = (v) => h('span', { class: `pill ${STATUS_CLASS[v] ?? ''}` }, v);
 // Numbers with thousands separators and at most 2 decimals; dates as DD/MM/YYYY.
@@ -72,6 +72,7 @@ function userPreset(resName) {
   if (resName === 'daily_logs') return { date: localToday(), process: p };
   if (resName === 'issues') return { opened: localToday(), from_process: p };
   if (resName === 'operator_outputs') return { date: localToday() };
+  if (resName === 'inventory_moves') return { date: localToday(), process: p || null };
   return {};
 }
 
@@ -127,7 +128,7 @@ async function editRecord(resName, row, preset, onSaved) {
   const res = state.meta.resources[resName];
   const isNew = !row;
   const ownedByOther = !isNew && res.ownerField && state.user.role !== 'admin' && row[res.ownerField] !== state.user.username;
-  const editable = isNew ? right(resName, 'create') : right(resName, 'update') && !ownedByOther;
+  const editable = isNew ? right(resName, 'create') : right(resName, 'update') && !ownedByOther && !res.noUpdate;
   const values = { ...(isNew ? userPreset(resName) : {}), ...(preset || {}), ...(row || {}) };
   if (isNew) for (const f of res.fields) if (values[f.name] === undefined && f.default !== undefined) values[f.name] = f.default;
 
@@ -326,6 +327,10 @@ async function viewDashboard() {
       h('thead', {}, h('tr', {}, ['Material', 'Thickness', 'Size', 'Qty', 'Minimum'].map((t) => h('th', {}, t)))),
       h('tbody', {}, d.lowStock.map((p) => h('tr', {}, h('td', {}, p.material), h('td', {}, p.thickness), h('td', {}, p.sheet_size || ''),
         h('td', { class: 'num' }, p.qty), h('td', { class: 'num' }, p.min_qty))))))] : null,
+    d.lowItems.length ? [h('h2', {}, 'Inventory to reorder'), h('div', { class: 'table-wrap' }, h('table', {},
+      h('thead', {}, h('tr', {}, ['Item', 'Name', 'Group', 'Location', 'On hand', 'Minimum', 'Stock'].map((t) => h('th', {}, t)))),
+      h('tbody', {}, d.lowItems.map((i) => h('tr', {}, h('td', {}, i.code), h('td', {}, i.name), h('td', {}, i.item_group), h('td', {}, i.location || ''),
+        h('td', { class: 'num' }, `${fmtNum(i.qty_on_hand)} ${i.unit || ''}`), h('td', { class: 'num' }, fmtNum(i.min_qty)), h('td', {}, pill(i.status)))))))] : null,
   ];
 }
 

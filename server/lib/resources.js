@@ -7,6 +7,9 @@ const MACHINE_TYPES = ['Fiber laser', 'Press brake', 'Clinching/PEM press', 'Pol
   'Shearing', 'Turret punch', 'Welding', 'General'];
 const MATERIALS = ['Aluminium', 'SS', 'SPCC', 'SECC', 'GI', 'Copper', 'Other'];
 // The job processes in the department, in the order work flows between them.
+const INVENTORY_GROUPS = ['Operator tools', 'Maintenance spares', 'Equipment'];
+// Stock movements: +1 adds to stock, -1 takes from it, 0 = signed qty (Adjust).
+const MOVE_SIGN = { 'Receive': 1, 'Issue / use': -1, 'Check out': -1, 'Check in': 1, 'Return': 1, 'Adjust': 0 };
 const PROCESSES = ['Designer', 'Planner', 'Engineer', 'Technician', 'Supervisor', 'Operator', 'Manager'];
 const EVERYONE = ['admin', 'planner', 'viewer'];
 
@@ -276,6 +279,42 @@ const resources = {
       { name: 'logged_by', label: 'Logged by', type: 'text', readonly: true },
     ],
   },
+  inventory_items: {
+    label: 'Inventory', singular: 'Item', group: 'Inventory',
+    write: ['admin', 'planner'],
+    display: 'code',
+    fields: [
+      { name: 'code', label: 'Item code', type: 'text', required: true, unique: true },
+      { name: 'name', label: 'Name', type: 'text', required: true },
+      { name: 'status', label: 'Stock', type: 'text', readonly: true },
+      { name: 'item_group', label: 'Group', type: 'select', options: INVENTORY_GROUPS, required: true },
+      { name: 'category', label: 'Category', type: 'text', help: 'e.g. Punch, Die, Gloves, Disc, Bearing, Oil' },
+      { name: 'location', label: 'Location', type: 'text' },
+      { name: 'process', label: 'Used by process', type: 'select', options: PROCESSES },
+      { name: 'machine_id', label: 'For machine', type: 'ref', ref: 'machines' },
+      { name: 'unit', label: 'Unit', type: 'select', options: ['pcs', 'set', 'pair', 'box', 'roll', 'litre', 'kg', 'm'], default: 'pcs' },
+      { name: 'qty_on_hand', label: 'Qty on hand', type: 'number', default: 0, help: 'Changing it here records an Adjust in the stock log.' },
+      { name: 'min_qty', label: 'Minimum stock', type: 'number', default: 0 },
+      { name: 'notes', label: 'Notes', type: 'textarea', list: false },
+    ],
+  },
+  inventory_moves: {
+    label: 'Stock log', singular: 'Stock movement', group: 'Inventory',
+    // Every use, check-out, return and receipt. Corrections are made with a new Adjust line.
+    write: EVERYONE, ownerField: 'moved_by', noUpdate: true,
+    display: 'id',
+    fields: [
+      { name: 'date', label: 'Date', type: 'date', required: true },
+      { name: 'item_id', label: 'Item', type: 'ref', ref: 'inventory_items', required: true },
+      { name: 'move', label: 'Movement', type: 'select', options: Object.keys(MOVE_SIGN), required: true },
+      { name: 'qty', label: 'Qty', type: 'number', required: true, help: 'For Adjust: + adds, - removes.' },
+      { name: 'process', label: 'Process', type: 'select', options: PROCESSES },
+      { name: 'machine_id', label: 'Machine', type: 'ref', ref: 'machines' },
+      { name: 'maint_order_id', label: 'Maintenance work order', type: 'ref', ref: 'maint_orders' },
+      { name: 'remark', label: 'Remark', type: 'text' },
+      { name: 'moved_by', label: 'By', type: 'text', readonly: true },
+    ],
+  },
   issues: {
     label: 'Issues', singular: 'Issue', group: 'Daily work',
     write: EVERYONE,
@@ -316,7 +355,8 @@ const OWNERS = {
   ncrs: ['Supervisor', 'Engineer'], reason_codes: ['Supervisor', 'Planner'],
   job_travellers: ['Planner', 'Supervisor'], jt_steps: ['Planner', 'Engineer'],
   operator_outputs: ['Operator', 'Supervisor'],
+  inventory_items: ['Technician', 'Supervisor'],
 };
 for (const [name, list] of Object.entries(OWNERS)) resources[name].processes = list;
 
-module.exports = { resources, columnType, MACHINE_TYPES, MATERIALS, PROCESSES };
+module.exports = { resources, columnType, MACHINE_TYPES, MATERIALS, PROCESSES, MOVE_SIGN };

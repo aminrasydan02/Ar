@@ -59,6 +59,22 @@ function seedDemo(db) {
     db.prepare(`INSERT INTO issues (issue_no, title, from_process, to_process, project_id, part_no, priority, status, opened, details, raised_by)
       VALUES (?, ?, 'Operator', 'Technician', ?, '606072702_PART_1', 'High', 'Open', date('now','localtime'), ?, 'admin')`)
       .run(`ISS-${new Date().getFullYear()}-0001`, 'Burr on laser-cut edge, AL-N1', projectId, 'Heavy burr from sheet 4 onward. Nozzle or focus may need checking.');
+    // Inventory: daily tools, maintenance spares, equipment. Opening stock is in the stock log.
+    const item = db.prepare(`INSERT INTO inventory_items (code, name, item_group, category, location, process, unit, qty_on_hand, min_qty, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    const open = db.prepare(`INSERT INTO inventory_moves (date, item_id, move, qty, remark, moved_by) VALUES (date('now','localtime'), ?, 'Receive', ?, 'Opening stock', 'admin')`);
+    [['GLV-01', 'Cut-resistant gloves', 'Operator tools', 'Gloves', 'Store rack A1', 'Operator', 'pair', 40, 20],
+      ['DSC-120', 'Sanding disc grit 120', 'Operator tools', 'Disc', 'Polishing bay', 'Operator', 'pcs', 15, 25],
+      ['PCH-88', 'Punch 88° R0.6', 'Operator tools', 'Punch', 'Tool cabinet BD-01', 'Operator', 'pcs', 4, 2],
+      ['DIE-V12', 'Die V12 88°', 'Operator tools', 'Die', 'Tool cabinet BD-01', 'Operator', 'pcs', 2, 1],
+      ['NZL-1.5', 'Laser nozzle 1.5 mm', 'Maintenance spares', 'Nozzle', 'Store rack B2', 'Technician', 'pcs', 3, 5],
+      ['LNS-PRT', 'Laser protective lens', 'Maintenance spares', 'Lens', 'Store rack B2', 'Technician', 'pcs', 6, 4],
+      ['OIL-HYD', 'Hydraulic oil ISO 46', 'Maintenance spares', 'Oil', 'Chemical store', 'Technician', 'litre', 40, 20],
+      ['VRN-150', 'Vernier caliper 150 mm', 'Equipment', 'Measuring', 'QC table', 'Supervisor', 'pcs', 3, 2],
+    ].forEach(([code, name, group, cat, loc, proc, unit, qty, min]) => {
+      const id = item.run(code, name, group, cat, loc, proc, unit, qty, min, qty <= 0 ? 'Out' : qty <= min ? 'Low' : 'OK').lastInsertRowid;
+      open.run(id, qty);
+    });
     db.exec('COMMIT');
     return true;
   } catch (err) {
