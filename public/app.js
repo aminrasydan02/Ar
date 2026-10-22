@@ -390,13 +390,13 @@ function templateImportDialog(resName, onDone) {
 // Dashboard layout: "classic" tables or the "cockpit" cards. Remembered on this PC only.
 function dashMode() {
   try { const m = localStorage.getItem('smm-dash'); if (m) return m; } catch (e) { /* storage blocked */ }
-  return state.user.theme === 'galaxy' ? 'cockpit' : 'classic';
+  return state.user.theme === 'galaxy' ? 'cockpit' : state.user.theme === 'kit' ? 'kit' : 'classic';
 }
 function viewSwitch() {
   const mode = dashMode();
   const pick = (m) => { try { localStorage.setItem('smm-dash', m); } catch (e) { /* storage blocked */ } route(); };
   return h('div', { class: 'view-switch', role: 'group', 'aria-label': 'Dashboard layout' },
-    [['cockpit', 'Cockpit'], ['classic', 'Classic']].map(([m, l]) => h('button', { type: 'button', class: mode === m ? 'on' : '', 'aria-pressed': String(mode === m), onclick: () => pick(m) }, l)));
+    [['cockpit', 'Cockpit'], ['kit', 'Kit'], ['classic', 'Classic']].map(([m, l]) => h('button', { type: 'button', class: mode === m ? 'on' : '', 'aria-pressed': String(mode === m), onclick: () => pick(m) }, l)));
 }
 
 // A bubble for any slicer: colour, title, two lines of detail and a value.
@@ -568,7 +568,13 @@ function projectProgressCard(list, cardClass) {
 async function viewDashboard() {
   const d = await api('GET', '/api/dashboard');
   projCache = d.projectProgress;
+  // Today's hourly output, this month's actual output and the working time, for every layout.
+  const today = localToday();
+  const [hourly, actual, wt] = await Promise.all([`/api/reports/hourly?date=${today}`, `/api/reports/actual?from=${today.slice(0, 8)}01&to=${today}`, '/api/worktime']
+    .map((u) => api('GET', u).catch(() => null)));
+  d.live = { today, hourly, actual, wt };
   if (dashMode() === 'cockpit') return viewCockpit(d);
+  if (dashMode() === 'kit') return viewKit(d);
   const k = d.kpi, pr = d.production;
   const stat = (ic, value, label, note, tone) => h('div', { class: `stat ${tone || ''}` }, h('span', { class: 'stat-i' }, icon(ic)),
     h('div', {}, h('div', { class: 'stat-n' }, value), h('div', { class: 'stat-l' }, label), note ? h('div', { class: 'stat-s' }, note) : null));
@@ -588,6 +594,8 @@ async function viewDashboard() {
       stat('chat', fmtNum(k.open_issues), 'Open issues', `${fmtNum(k.open_ncrs)} open NCR`, k.open_issues ? 'alert' : 't2'),
       stat('gear', fmtNum(k.machines_down), 'Machines down', `${fmtNum(k.open_work_orders)} open maintenance`, k.machines_down ? 'alert' : 't2')),
     h('div', { class: 'dgrid' },
+      todayCard(d.live, 'dcard'),
+      monthCard(d.live, 'dcard'),
       projectProgressCard(d.projectProgress, 'dcard wide'),
       processCard(d.processes, d.minutesPerDay, 'dcard wide'),
       scheduleCard(d.schedules, d.projectProgress, 'dcard wide'),
@@ -1003,9 +1011,41 @@ const PAGE_ICONS = {
 };
 // Page title card: icon, title, a short line, and room for the slicer chips.
 function pageHead(title, iconName, sub, ...extra) {
-  return h('header', { class: 'page-head' },
+  return h('header', { class: 'page-head' }, pageArt(iconName),
     h('div', { class: 'ph-row' }, h('span', { class: 'ph-icon' }, icon(iconName || 'grid')),
       h('div', { class: 'ph-text' }, h('h1', {}, title), sub ? h('p', {}, sub) : null), extra));
+}
+
+// Faint sheet-metal line drawings behind each page title, chosen to suit the page.
+const ART = {
+  laser: 'M20 122 L84 94 H304 L240 122 Z M58 24 H296 M58 24 V36 M296 24 V36 M70 36 H284 M146 30 v18 h28 v-18 z M152 48 l8 10 l8 -10 M160 60 V104 ' +
+    'M120 112 l16 -7 h44 l-16 7 z M196 112 l14 -6 h30 l-14 6 z M100 104 l10 -4 h20 l-10 4 z M160 104 l-10 -7 M160 104 l11 -5 M160 104 l-3 -11 M160 104 l8 5 M160 104 l-12 2',
+  brake: 'M40 18 h240 v28 h-240 z M64 46 v80 M256 46 v80 M28 126 h264 M148 46 v20 l12 14 l12 -14 v-20 M116 102 h88 v14 h-88 z M148 102 l12 -12 l12 12 ' +
+    'M70 74 L160 90 L250 74 M236 30 h28 M56 30 h40 M44 60 h8 M268 60 h8',
+  plates: 'M40 112 L96 88 H292 L236 112 Z M40 100 L96 76 H292 L236 100 Z M40 88 L96 64 H292 L236 88 Z M40 76 L96 52 H292 L236 76 Z M40 76 V112 M236 76 V112 M292 52 V88 ' +
+    'M60 40 h30 M60 36 v8 M90 36 v8 M120 30 h56',
+  blueprint: 'M40 110 v-56 h70 v-20 h110 v20 h60 v56 z M70 82 a8 8 0 1 0 0.1 0 M250 82 a8 8 0 1 0 0.1 0 M140 72 h50 v22 h-50 z ' +
+    'M40 124 h240 M40 120 v8 M280 120 v8 M46 124 l-6 -3 v6 z M274 124 l6 -3 v6 z M296 34 v76 M292 34 h8 M292 110 h8 M110 18 h110 M110 14 v8 M220 14 v8',
+  weld: 'M40 112 h120 l20 -20 h100 M40 112 l20 -20 h120 M150 92 l10 20 M70 22 l60 46 M60 14 l16 12 l-6 8 l-16 -12 z M128 66 l10 10 ' +
+    'M150 92 l-14 -4 M150 92 l-2 -14 M150 92 l12 -10 M150 92 l16 2 M150 92 l-10 10 M176 104 q8 -4 16 0 q8 4 16 0 q8 -4 16 0',
+  machine: 'M40 30 h160 v92 h-160 z M54 44 h80 v50 h-80 z M150 44 h36 v24 h-36 z M156 80 a5 5 0 1 0 .1 0 M176 80 a5 5 0 1 0 .1 0 M150 100 h36 M200 50 h26 v72 h-26 ' +
+    'M260 60 a26 26 0 1 0 .1 0 M260 74 a12 12 0 1 0 .1 0 M260 30 v8 M260 108 v8 M226 86 h8 M286 86 h8 M236 62 l6 6 M278 104 l6 6 M236 110 l6 -6 M278 68 l6 -6 M30 122 h270',
+  caliper: 'M30 58 h250 v16 h-250 z M40 74 v40 l14 -10 v-30 M40 58 v-26 l12 8 v18 M150 50 h40 v32 h-40 z M164 82 v32 l-14 -10 v-22 M164 50 v-20 l-12 8 v12 ' +
+    'M60 58 v6 M70 58 v4 M80 58 v6 M90 58 v4 M100 58 v6 M110 58 v4 M120 58 v6 M130 58 v4 M210 58 v6 M220 58 v4 M230 58 v6 M240 58 v4 M250 58 v6 M260 58 v4',
+  rack: 'M40 20 v104 M280 20 v104 M40 52 h240 M40 88 h240 M40 124 h240 M56 30 h40 v22 h-40 z M104 34 h30 v18 h-30 z M190 26 h50 v26 h-50 z ' +
+    'M62 64 h60 v24 h-60 z M140 70 h28 v18 h-28 z M200 62 h56 v26 h-56 z M60 102 h44 v22 h-44 z M120 98 h60 v26 h-60 z M214 106 h34 v18 h-34 z',
+  factory: 'M20 124 V70 l40 -28 v28 l40 -28 v28 l40 -28 v28 l40 -28 v82 M220 124 V40 h18 v84 M244 124 V58 h52 v66 M18 124 h284 ' +
+    'M40 92 h22 v14 h-22 z M84 92 h22 v14 h-22 z M128 92 h22 v14 h-22 z M256 72 h12 v10 h-12 z M276 72 h12 v10 h-12 z M226 28 q6 -8 0 -16 M232 30 q8 -10 2 -20',
+  roll: 'M60 80 a36 36 0 1 0 .1 0 M60 104 a12 12 0 1 0 .1 0 M96 116 L292 116 M92 100 L292 100 M232 100 v16 M160 30 h60 v24 h-60 z M190 54 v36 M184 90 h12 ' +
+    'M40 124 h260 M110 124 l-10 -8 M80 124 l10 -8',
+};
+const ART_FOR = { nest: 'laser', layers: 'plates', draw: 'blueprint', gear: 'machine', wrench: 'machine', clip: 'machine', alert: 'caliper', check: 'caliper',
+  box: 'rack', list: 'rack', tag: 'rack', layout: 'factory', grid: 'factory', folder: 'factory', plus: 'blueprint', jt: 'brake', form: 'brake', pulse: 'laser',
+  clock: 'brake', gantt: 'roll', users: 'weld', board: 'weld', cal: 'roll', chat: 'weld', route: 'roll', flow: 'roll', shield: 'factory', user: 'weld', search: 'blueprint' };
+function pageArt(iconName) {
+  const d = ART[ART_FOR[iconName] || 'factory'];
+  return svg('svg', { class: 'ph-art', viewBox: '0 0 320 140', fill: 'none', stroke: 'currentColor', 'stroke-width': '2', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true' },
+    svg('path', { d }));
 }
 const icon = (n) => svg('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.8', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true' }, svg('path', { d: ICONS[n] }));
 
@@ -1055,7 +1095,7 @@ function calendar(marks) {
   const month = new Date(Date.UTC(y, m - 1, 1)).toLocaleString('en-MY', { month: 'long', year: 'numeric', timeZone: 'UTC' });
   return [h('div', { class: 'ck-sub' }, month),
     h('div', { class: 'ck-cal' }, ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su'].map((x) => h('div', { class: 'dn' }, x)), cells),
-    h('div', { class: 'ck-cal-note' }, 'Pink: today. Orange: Job Traveller or project due.')];
+    h('div', { class: 'ck-cal-note' }, 'Pink: today. Orange: Job Traveller, project due or holiday.')];
 }
 
 async function viewCockpit(d) {
@@ -1111,6 +1151,8 @@ async function viewCockpit(d) {
       h('div', { class: 'ck-actions' }, h('a', { class: 'btn', href: `#/jt/${nextJt.id}` }, 'Open'),
         right('job_travellers', 'approve') ? h('a', { class: 'btn grad', href: `#/jt/${nextJt.id}` }, 'Review and approve') : null)]
       : h('p', { class: 'muted' }, 'Every Job Traveller is approved.')),
+    todayCard(d.live, 'ck-card'),
+    monthCard(d.live, 'ck-card'),
     processCard(d.processes, d.minutesPerDay, 'ck-card wide'),
     scheduleCard(d.schedules, d.projectProgress, 'ck-card wide'),
     card('Job Traveller status', donut([
@@ -1121,7 +1163,8 @@ async function viewCockpit(d) {
   const docs = [...drawings].sort((a, b) => String(b.created_at || b.id).localeCompare(String(a.created_at || a.id), undefined, { numeric: true })).slice(0, 5);
   const tasks = d.issues.filter((i) => !me.process || i.to_process === me.process || me.role === 'admin').slice(0, 6);
   const marks = {};
-  for (const x of [...live.filter((j) => j.status !== 'Completed').map((j) => [j.due_date, j.jt_no]), ...projects.map((p) => [p.due_date, p.code])]) {
+  for (const x of [...live.filter((j) => j.status !== 'Completed').map((j) => [j.due_date, j.jt_no]), ...projects.map((p) => [p.due_date, p.code]),
+    ...((d.live.wt && d.live.wt.holidays) || []).map((x) => [x.date, x.name])]) {
     if (x[0]) (marks[x[0].slice(0, 10)] = marks[x[0].slice(0, 10)] || []).push(x[1]);
   }
   const rightCol = h('div', { class: 'ck-col ck-right' },
@@ -1137,6 +1180,145 @@ async function viewCockpit(d) {
     card('Schedule', calendar(marks)));
 
   return [pageHead(`Hello, ${name.split(' ')[0]}`, 'grid', `${fmtDate(localToday())} · ${[me.process, me.role].filter(Boolean).join(' · ')}`, viewSwitch()), h('div', { class: 'ck' }, left, mid, rightCol)];
+}
+
+// ---------- live production cards (every dashboard layout) ----------------------
+
+const sumBy = (list, k) => list.reduce((n, x) => n + (Number(x[k]) || 0), 0);
+// Good pcs per hour today: plan from the roster, actual from the Operator form.
+function hourTotals(live) {
+  const shifts = (live.wt && live.wt.shifts) || [];
+  const rows = ((live.actual && live.actual.rows) || []).filter((x) => x.date === live.today);
+  const roster = (live.hourly && live.hourly.rows) || [];
+  return shifts.flatMap((sh) => sh.slots.map((sl) => ({
+    label: sl.label, shift: sh.name,
+    actual: sumBy(rows.filter((x) => String(x.slot || '').endsWith(sl.label) && (!x.slot.includes(' ') || x.slot.startsWith(`${sh.name} `))), 'good_qty'),
+    plan: roster.filter((x) => x.shift === sh.name).reduce((n, x) => n + ((x.slots.find((y) => y.label === sl.label) || {}).plan || 0), 0),
+  })));
+}
+// Bars with an optional line, drawn as SVG so every theme colours it.
+function barChart(items, { line, height = 150, width = 320, labelEvery = 1 } = {}) {
+  const W = width, H = height, pad = 22, n = items.length || 1, bw = (W - pad) / n;
+  const max = Math.max(1, ...items.map((x) => Math.max(x.v || 0, x.p || 0, line ? x.l || 0 : 0)));
+  const y = (v) => H - 18 - ((v || 0) / max) * (H - 30);
+  const kids = [svg('line', { x1: pad, x2: W, y1: H - 18, y2: H - 18, class: 'bc-axis' })];
+  items.forEach((x, i) => {
+    const cx = pad + i * bw;
+    if (x.p) kids.push(svg('rect', { x: cx + bw * 0.15, y: y(x.p), width: bw * 0.7, height: H - 18 - y(x.p), rx: 3, class: 'bc-plan' }));
+    if (x.v) kids.push(svg('rect', { x: cx + bw * 0.25, y: y(x.v), width: bw * 0.5, height: H - 18 - y(x.v), rx: 3, class: 'bc-bar' }, svg('title', {}, `${x.t}: ${fmtNum(x.v)}${x.p ? ` / ${fmtNum(x.p)}` : ''}`)));
+    if (i % labelEvery === 0) kids.push(svg('text', { x: cx + bw / 2, y: H - 4, 'text-anchor': 'middle', class: 'bc-l' }, x.t));
+  });
+  if (line) kids.push(svg('polyline', { points: items.map((x, i) => `${pad + i * bw + bw / 2},${y(x.l)}`).join(' '), class: 'bc-line', fill: 'none' }));
+  kids.push(svg('text', { x: 0, y: 12, class: 'bc-l' }, fmtNum(max)));
+  return svg('svg', { viewBox: `0 0 ${W} ${H}`, class: 'bchart', role: 'img', 'aria-label': items.map((x) => `${x.t} ${x.v || 0}`).join(', ') }, kids);
+}
+// Daily good pcs this month, with a 7-day average line.
+function monthDays(live) {
+  const rows = (live.actual && live.actual.rows) || [];
+  const days = Number(live.today.slice(8, 10));
+  const out = [];
+  for (let i = 1; i <= days; i++) {
+    const iso = `${live.today.slice(0, 8)}${String(i).padStart(2, '0')}`;
+    out.push({ t: String(i), iso, v: sumBy(rows.filter((x) => x.date === iso), 'good_qty') });
+  }
+  out.forEach((x, i) => { const w = out.slice(Math.max(0, i - 6), i + 1); x.l = sumBy(w, 'v') / w.length; });
+  return out;
+}
+const todayGood = (live) => sumBy(((live.actual && live.actual.rows) || []).filter((x) => x.date === live.today), 'good_qty');
+function todayCard(live, cardClass) {
+  const hrs = hourTotals(live);
+  const act = todayGood(live), plan = sumBy(hrs, 'plan');
+  const ops = new Set(((live.hourly && live.hourly.rows) || []).map((x) => x.operator)).size;
+  const shifts = (live.wt && live.wt.shifts) || [];
+  return h('section', { class: cardClass },
+    h('div', { class: 'dcard-h' }, h('span', { class: 'dcard-i' }, icon('clock')), h('h2', {}, 'Today on the floor'), h('a', { href: '#/hourly' }, 'Hourly output')),
+    h('div', { class: 'live-nums' },
+      h('div', {}, h('strong', {}, fmtNum(act)), h('small', {}, 'good pcs today')),
+      h('div', {}, h('strong', {}, plan ? fmtPct((act / plan) * 100) : '—'), h('small', {}, plan ? `of ${fmtNum(plan)} planned` : 'no roster plan')),
+      h('div', {}, h('strong', {}, String(ops)), h('small', {}, 'operators on roster'))),
+    hrs.length ? barChart(hrs.map((x) => ({ t: x.label.slice(0, 5), v: x.actual, p: x.plan })), { height: 150, width: 420, labelEvery: hrs.length > 9 ? 2 : 1 }) : null,
+    h('p', { class: 'muted small' }, shifts.map((x) => `${x.name} ${x.start_time}–${x.end_time}`).join(' · ') || 'No shift set. Admin sets it in Working time.',
+      plan ? ' · light bars: plan, dark bars: actual' : ''));
+}
+function monthCard(live, cardClass) {
+  const days = monthDays(live);
+  const rows = (live.actual && live.actual.rows) || [];
+  const good = sumBy(rows, 'good_qty'), rej = sumBy(rows, 'reject_qty');
+  const month = new Date(`${live.today}T00:00:00Z`).toLocaleString('en-MY', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+  return h('section', { class: cardClass },
+    h('div', { class: 'dcard-h' }, h('span', { class: 'dcard-i' }, icon('pulse')), h('h2', {}, `Actual output · ${month}`), h('a', { href: '#/actual' }, 'Actual output')),
+    h('div', { class: 'live-nums' },
+      h('div', {}, h('strong', {}, fmtNum(good)), h('small', {}, 'good pcs')),
+      h('div', {}, h('strong', {}, fmtNum(rej)), h('small', {}, 'reject pcs')),
+      h('div', {}, h('strong', {}, good + rej ? fmtPct((good / (good + rej)) * 100) : '—'), h('small', {}, 'yield'))),
+    barChart(days, { line: true, height: 170, width: 420, labelEvery: days.length > 16 ? 3 : 1 }),
+    h('p', { class: 'muted small' }, 'Bars: good pcs per day. Line: 7-day average.'));
+}
+
+// ---------- Kit dashboard (light cards, purple accents) ----------------------------
+
+function viewKit(d) {
+  const k = d.kpi, pr = d.production, live = d.live;
+  const rows = (live.actual && live.actual.rows) || [];
+  const days = monthDays(live);
+  const hrs = hourTotals(live);
+  const tile = (ic, v, l, href) => h('a', { class: 'kit-tile', href }, h('span', { class: 'kit-ti' }, icon(ic)), h('div', {}, h('strong', {}, v), h('small', {}, l)));
+  const card = (cls, ...kids) => h('section', { class: `kit-card ${cls}` }, kids);
+  // Wave of cumulative good pcs this month.
+  let run = 0;
+  const cum = days.map((x) => (run += x.v));
+  const max = Math.max(1, ...cum);
+  const pts = cum.map((v, i) => `${(i / Math.max(1, cum.length - 1)) * 320},${80 - (v / max) * 64}`);
+  const wave = svg('svg', { viewBox: '0 0 320 84', class: 'kit-wave', preserveAspectRatio: 'none', 'aria-hidden': 'true' },
+    svg('path', { d: `M0,84 L${pts.join(' L')} L320,84 Z`, class: 'kit-wave-a' }), svg('polyline', { points: pts.join(' '), class: 'kit-wave-l', fill: 'none' }));
+  const topProcs = d.processes.slice(0, 3);
+  const week = days.slice(-7);
+  const live7 = d.live.today;
+  const jtCount = (st) => d.projectProgress.reduce((n, p) => n + ((p.job_travellers && p.job_travellers[st]) || 0), 0);
+  const statusParts = [['Planned', 'var(--ring-3)'], ['In progress', 'var(--ring-1)'], ['Completed', 'var(--ring-2)'], ['On hold', 'var(--ring-4)']]
+    .map(([label, colour]) => ({ label, colour, n: jtCount(label) }));
+  return [
+    pageHead('Dashboard', 'grid', `${fmtDate(live7)} · net ${d.minutesPerDay} working min/day`, viewSwitch()),
+    h('div', { class: 'kit' },
+      card('kit-tiles span-6',
+        tile('folder', fmtNum(k.active_projects), 'Active projects', '#/r/projects'),
+        tile('box', fmtNum(k.parts), 'Parts', '#/r/parts'),
+        tile('jt', fmtNum(d.projectProgress.reduce((n, p) => n + Object.values(p.job_travellers || {}).reduce((a, b) => a + b, 0), 0)), 'Job Travellers', '#/r/job_travellers'),
+        tile('check', fmtNum(pr.good), 'Good pcs', '#/actual'),
+        tile('alert', fmtNum(k.open_ncrs), 'Open NCR', '#/r/ncrs'),
+        tile('chat', fmtNum(k.open_issues), 'Open issues', '#/r/issues')),
+      card('span-6 row-2',
+        h('div', { class: 'kit-h' }, h('h2', {}, 'Actual output this month'), h('a', { href: '#/actual' }, 'Details')),
+        h('div', { class: 'kit-big' }, h('div', {}, h('strong', {}, fmtNum(sumBy(rows, 'good_qty'))), h('small', {}, 'Good pcs')),
+          h('div', {}, h('strong', {}, fmtNum(sumBy(rows, 'reject_qty'))), h('small', {}, 'Reject pcs')),
+          h('div', {}, h('strong', {}, fmtNum(sumBy(days, 'v') / Math.max(1, days.filter((x) => x.v).length))), h('small', {}, 'Average a working day'))),
+        barChart(days, { line: true, height: 230, width: 560, labelEvery: days.length > 16 ? 3 : 1 }),
+        h('div', { class: 'kit-legend' }, h('span', { class: 'sw bar' }), 'Good pcs per day', h('span', { class: 'sw line' }), '7-day average')),
+      card('span-3 kit-wavecard',
+        h('div', { class: 'kit-pad' }, h('div', { class: 'kit-n' }, fmtPct(pr.completion)), h('a', { href: '#/r/job_travellers' }, 'Completion'),
+          h('p', {}, `${fmtNum(pr.good)} of ${fmtNum(pr.target)} pcs made across every process.`)),
+        wave,
+        h('div', { class: 'kit-strip' }, topProcs.map((p) => h('div', {}, h('strong', {}, fmtPct(p.completion)), h('small', {}, p.name))))),
+      card('span-3',
+        h('div', { class: 'kit-pad' }, h('div', { class: 'kit-n' }, fmtNum(todayGood(live))), h('a', { href: '#/hourly' }, 'Good pcs today'),
+          h('p', {}, 'Good pcs made today, hour by hour.')),
+        h('div', { class: 'kit-three' },
+          h('div', {}, h('strong', {}, fmtNum(sumBy(week, 'v'))), h('small', {}, 'Last 7 days')),
+          h('div', {}, h('strong', {}, fmtNum(pr.balance)), h('small', {}, 'Pcs to make')),
+          h('div', {}, h('strong', {}, fmtNum(pr.remaining_min / 60, 1)), h('small', {}, 'Hours left'))),
+        barChart(hrs.map((x) => ({ t: x.label.slice(0, 2), v: x.actual, p: x.plan })), { height: 110, width: 260 })),
+      card('span-6',
+        h('div', { class: 'kit-h' }, h('h2', {}, 'Job Traveller status'), h('a', { href: '#/r/job_travellers' }, 'All')),
+        h('p', { class: 'muted small' }, 'Every Job Traveller by its status, across all projects.'),
+        donut(statusParts)),
+      h('div', { class: 'kit-colour span-6' },
+        h('a', { class: 'kit-c', href: '#/plan' }, h('div', {}, h('small', {}, 'Hours of work left'), h('strong', {}, fmtNum(pr.remaining_min / 60, 1))), icon('clock')),
+        h('a', { class: 'kit-c fill', href: '#/actual' }, h('div', {}, h('small', {}, 'First-pass yield'), h('strong', {}, fmtPct(pr.yield))), icon('check')),
+        h('a', { class: 'kit-c fill', href: '#/r/machines' }, h('div', {}, h('small', {}, 'Machines down'), h('strong', {}, fmtNum(k.machines_down))), icon('gear')),
+        h('a', { class: 'kit-c', href: '#/r/maint_orders' }, h('div', {}, h('small', {}, 'Open maintenance'), h('strong', {}, fmtNum(k.open_work_orders))), icon('wrench'))),
+      projectProgressCard(d.projectProgress, 'kit-card span-12'),
+      processCard(d.processes, d.minutesPerDay, 'kit-card span-12'),
+      scheduleCard(d.schedules, d.projectProgress, 'kit-card span-12'))];
 }
 
 function viewList(resName) {
@@ -2011,6 +2193,7 @@ const THEMES = [
   ['green', 'Soft green', 'Green tones that are easy on the eyes.', ['#1e4d3a', '#24604a', '#e0a43a', '#f2f5f1']],
   ['contrast', 'High contrast', 'Black and white with thick lines. Easiest to read from a distance.', ['#000000', '#00307a', '#ffcc00', '#ffffff']],
   ['galaxy', 'Galaxy', 'Purple glass cards with colour rings. Opens the Cockpit dashboard.', ['#17123f', '#7c3aed', '#f472b6', '#2dd4bf']],
+  ['kit', 'Kit', 'Light cards with purple accents and a dark menu. Opens the Kit dashboard.', ['#1c232f', '#5b4fd8', '#f4f7fa', '#ffffff']],
 ];
 function applyTheme(t) { document.documentElement.dataset.theme = t || 'standard'; }
 
