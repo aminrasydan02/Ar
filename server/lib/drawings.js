@@ -1,11 +1,15 @@
 'use strict';
 const path = require('node:path');
 
-const FORMATS = ['pdf', 'dwg', 'idw', 'slddrw', 'ipt', 'iam', 'sldprt', 'sldasm', 'dxf'];
+const FORMATS = ['pdf', 'dwg', 'idw', 'slddrw', 'ipt', 'iam', 'sldprt', 'sldasm', 'dxf', 'step', 'stp', 'png', 'jpg', 'jpeg'];
+const MODEL_FORMATS = ['step', 'stp', 'ipt', 'iam', 'sldprt', 'sldasm'];
 
 const MIME = {
   pdf: 'application/pdf',
   dxf: 'image/vnd.dxf',
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
 };
 
 // "606118901_PART_1 Rev C.pdf" -> { part_no: '606118901_PART_1', rev: 'C', format: 'pdf' }
@@ -25,4 +29,4 @@ function safeFilename(name) {
   return path.basename(String(name || 'file')).replace(/[^\w .()-]/g, '_').slice(0, 200) || 'file';
 }
 
-module.exports = { FORMATS, MIME, parseDrawingName, safeFilename };
+module.exports = { FORMATS, MODEL_FORMATS, MIME, parseDrawingName, safeFilename };

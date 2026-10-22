@@ -106,4 +106,4 @@ function readJobTravellers(buf, filename, processes) {
   return { sheet: sheets[table.si].name, lines: out };
 }
 
-module.exports = { readJobTravellers };
+module.exports = { readJobTravellers, parseCsv };

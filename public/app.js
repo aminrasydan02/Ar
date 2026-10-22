@@ -211,12 +211,53 @@ function recordTable(resName, { filter = {}, extra = [], rowActions, columns, on
   wrap.append(h('div', { class: 'toolbar' },
     search, count, h('span', { class: 'grow' }),
     extra,
-    right(resName, 'export') ? h('a', { class: 'btn', href: `/api/${resName}/export.csv?${new URLSearchParams(filter)}` }, 'Export CSV') : null,
+    right(resName, 'create') && !res.noCreate ? [
+      h('a', { class: 'btn', href: `/api/${resName}/template.xlsx`, title: 'Excel template with a guide sheet' }, 'Template'),
+      h('button', { class: 'btn', onclick: () => templateImportDialog(resName, load) }, 'Import template')] : null,
+    right(resName, 'export') ? h('a', { class: 'btn', href: `/api/${resName}/export.xlsx?${new URLSearchParams(filter)}` }, 'Export Excel') : null,
+    right(resName, 'export') ? h('a', { class: 'btn', href: `/api/${resName}/export.csv?${new URLSearchParams(filter)}` }, 'CSV') : null,
     right(resName, 'create') ? h('button', { class: 'btn primary', onclick: () => (onRow ? onRow(null, load) : editRecord(resName, null, filter, load)) }, `+ New ${res.singular}`) : null),
     tableBox);
   load();
   wrap.reload = load;
   return wrap;
+}
+
+// Upload a filled template: check every row first, then save all rows or none.
+function templateImportDialog(resName, onDone) {
+  const res = state.meta.resources[resName];
+  const err = h('div');
+  const result = h('div');
+  const input = h('input', { type: 'file', accept: '.xlsx,.csv' });
+  let file = null;
+  let ready = false;
+  const url = (commit) => `/api/${resName}/import-template?${new URLSearchParams({ filename: file.name, ...(commit ? { commit: 1 } : {}) })}`;
+  input.addEventListener('change', async () => {
+    file = input.files[0];
+    ready = false;
+    err.replaceChildren(); result.replaceChildren();
+    if (!file) return;
+    try {
+      const r = await api('POST', url(false), undefined, file);
+      ready = !r.errors.length;
+      result.replaceChildren(
+        h('div', { class: `msg ${ready ? 'ok' : 'err'}` }, `${r.ok} of ${r.rows} row(s) ready${ready ? '. Press Import to save.' : '. Fix these rows in Excel and choose the file again:'}`),
+        r.errors.length ? h('div', { class: 'table-wrap' }, h('table', {},
+          h('thead', {}, h('tr', {}, h('th', {}, 'Row'), h('th', {}, 'Problem'))),
+          h('tbody', {}, r.errors.map((e) => h('tr', {}, h('td', { class: 'num' }, e.line), h('td', { class: 'wrap' }, e.error)))))) : null);
+    } catch (e) { err.replaceChildren(h('div', { class: 'msg err' }, e.message)); }
+  });
+  openModal(`Import ${res.label} template`, [err,
+    h('p', { class: 'muted' }, 'Download the template, fill one row per record in Excel (see the Guide sheet), then choose the file here. Nothing is saved until every row is correct.'),
+    h('p', {}, h('a', { class: 'btn small', href: `/api/${resName}/template.xlsx` }, 'Download template')),
+    input, result], (close) => [
+    h('button', { class: 'btn', onclick: close }, 'Cancel'),
+    h('button', { class: 'btn primary', onclick: async () => {
+      if (!file || !ready) return;
+      try { const r = await api('POST', url(true), undefined, file); close(); toast(`${r.rows} ${res.label.toLowerCase()} row(s) imported`); onDone(); }
+      catch (e) { err.replaceChildren(h('div', { class: 'msg err' }, e.message)); }
+    } }, 'Import'),
+  ]);
 }
 
 // ---------- views ------------------------------------------------------------
@@ -298,7 +339,7 @@ function viewList(resName) {
   if (resName === 'issues') opts.rowActions = (r) => h('a', { class: 'btn small', href: `#/issue/${r.id}` }, 'Discuss');
   if (resName === 'job_travellers') {
     opts.rowActions = (r) => h('a', { class: 'btn small', href: `#/jt/${r.id}` }, 'Open');
-    if (right('job_travellers', 'create')) opts.extra = [h('button', { class: 'btn', onclick: () => importDialog(() => route()) }, 'Import Excel')];
+    if (right('job_travellers', 'create')) opts.extra = [h('button', { class: 'btn', onclick: () => importDialog(() => route()) }, 'Import NEWAYS report')];
   }
   if (resName === 'operator_outputs') opts.onRow = (r, reload) => outputDialog(r, {}, reload);
   return [h('h1', {}, res.label), recordTable(resName, opts)];

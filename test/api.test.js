@@ -367,3 +367,46 @@ test('NEWAYS demo Job Travellers carry the report routing; dashboard shows work 
   assert.equal(d.processes.filter((p) => p.bottleneck).length, 1);
   assert.equal(d.production.target, d.processes.reduce((n, p) => n + p.target, 0));
 });
+
+test('Excel template: download, fill, check, import; Excel export', async () => {
+  const t = await fetch(`${base}/api/job_travellers/template.xlsx`, { headers: { cookie: planner } });
+  assert.equal(t.status, 200);
+  assert.match(t.headers.get('content-type'), /spreadsheetml/);
+  const { readXlsx, writeXlsx } = require('../server/lib/xlsx');
+  const sheets = readXlsx(Buffer.from(await t.arrayBuffer()));
+  assert.deepEqual(sheets.map((s) => s.name), ['Data', 'Guide']);
+  const head = sheets[0].rows[1];
+  assert.ok(head.includes('Part number *') && head.includes('Project') && !head.includes('Status *'));
+  assert.ok(sheets[1].rows.some((r) => r && r[0] === 'Material' && /Aluminium/.test(r[3])));
+
+  // Fill the template the way a planner would in Excel: dates as DD/MM/YYYY, project by its code.
+  const filled = writeXlsx([{ name: 'Data', title: 'x', rows: [head,
+    head.map((h) => ({ 'Part number *': 'TPL-001', 'Required qty (pcs) *': 50, Project: 'NEWAYS', 'Due date': '30/11/2026', Material: 'SS' }[h] ?? null)),
+    head.map((h) => ({ 'Part number *': 'TPL-002', 'Required qty (pcs) *': 20, Project: 'NOPE' }[h] ?? null)),
+  ] }]);
+  const url = '/api/job_travellers/import-template?filename=jt.xlsx';
+  const check = await call(planner, 'POST', url, filled);
+  assert.equal(check.status, 200);
+  assert.equal(check.data.ok, 1);
+  assert.match(check.data.errors[0].error, /Project "NOPE" not found/);
+  assert.equal((await call(planner, 'POST', `${url}&commit=1`, filled)).status, 400, 'nothing saved while a row is wrong');
+  assert.equal((await call(planner, 'GET', '/api/job_travellers?part_no=TPL-001')).data.length, 0);
+
+  const good = writeXlsx([{ name: 'Data', rows: [head, head.map((h) => ({ 'Part number *': 'TPL-001', 'Required qty (pcs) *': 50, Project: 'neways', 'Due date': '30/11/2026' }[h] ?? null))] }]);
+  const done = await call(planner, 'POST', `${url}&commit=1`, good);
+  assert.equal(done.status, 200);
+  const jt = (await call(planner, 'GET', '/api/job_travellers?part_no=TPL-001')).data[0];
+  assert.equal(jt.due_date, '2026-11-30');
+  assert.equal(jt.project_id__label, 'NEWAYS');
+  assert.match(jt.jt_no, /^JT-/);
+
+  const csv = 'Part number,Required qty (pcs)\nTPL-003,7\n';
+  assert.equal((await call(planner, 'POST', '/api/job_travellers/import-template?filename=x.csv&commit=1', Buffer.from(csv))).status, 200);
+  assert.equal((await call(planner, 'POST', '/api/machines/import-template?filename=x.csv', Buffer.from(csv))).status, 403);
+  assert.equal((await call(admin, 'POST', '/api/drawings/import-template?filename=x.csv', Buffer.from(csv))).status, 400);
+
+  const ex = await fetch(`${base}/api/job_travellers/export.xlsx`, { headers: { cookie: planner } });
+  const out = readXlsx(Buffer.from(await ex.arrayBuffer()))[0];
+  assert.equal(out.rows[1][0], 'ID');
+  assert.ok(out.rows.some((r) => r && r.includes('TPL-001') && r.includes('30/11/2026')));
+});

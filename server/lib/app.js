@@ -8,6 +8,7 @@ const auth = require('./auth');
 const { FORMATS, MIME, parseDrawingName, safeFilename } = require('./drawings');
 const { buildDashboard } = require('./dashboard');
 const { readJobTravellers } = require('./jtimport');
+const templates = require('./templates');
 
 const VERSION = require('../../package.json').version;
 const PUBLIC_DIR = path.join(__dirname, '..', '..', 'public');
@@ -315,6 +316,41 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
     return listRecords('wf_steps', new URLSearchParams({ part_id: String(partId) }));
   }
 
+  // ---- templates: download, fill in Excel, import ------------------------
+
+  const XLSX_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+  const xlsxHeaders = (file) => ({ 'Content-Type': XLSX_TYPE, 'Content-Disposition': `attachment; filename="${file}"` });
+
+  // Without commit=1 it only checks the rows; with it, all rows are saved or none.
+  async function importTemplate(req, url, name, user) {
+    allow(user, 'create', name);
+    if (resources[name].noCreate) throw new HttpError(400, 'This module cannot be imported');
+    const filename = safeFilename(url.searchParams.get('filename') || 'import.xlsx');
+    if (!/\.(xlsx|csv)$/i.test(filename)) throw new HttpError(400, 'Use an .xlsx or .csv file');
+    let rows;
+    try { rows = templates.readTemplate(db, name, await readBody(req, 20 * 1024 * 1024), filename); } catch (err) { throw new HttpError(400, err.message); }
+    if (!rows.length) throw new HttpError(400, 'The template has no rows to import');
+    if (rows.length > 2000) throw new HttpError(400, 'At most 2,000 rows per import');
+    const checked = rows.map((r) => {
+      const errors = [...r.errors];
+      let data = null;
+      if (!errors.length) {
+        try { data = clean(name, userDefaults(name, r.input, user), { partial: false }); } catch (err) { errors.push(err.message); }
+      }
+      return { line: r.line, data, errors };
+    });
+    const bad = checked.filter((r) => r.errors.length).map((r) => ({ line: r.line, error: r.errors.join('; ') }));
+    const result = { rows: checked.length, ok: checked.length - bad.length, errors: bad };
+    if (url.searchParams.get('commit') !== '1') return result;
+    if (bad.length) throw new HttpError(400, `Fix ${bad.length} row(s) first: ${bad.slice(0, 3).map((b) => `row ${b.line}: ${b.error}`).join(' | ')}`);
+    db.exec('BEGIN');
+    try {
+      for (const r of checked) createRecord(name, r.data, user);
+      db.exec('COMMIT');
+    } catch (err) { db.exec('ROLLBACK'); throw err.status ? new HttpError(err.status, `${err.message} (import cancelled, nothing saved)`) : err; }
+    return { ...result, committed: true };
+  }
+
   // ---- job travellers ----------------------------------------------------
 
   // Target, good and reject per process step, summed from the Operator form.
@@ -566,6 +602,19 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
     const name = parts[0];
     if (!Object.prototype.hasOwnProperty.call(resources, name)) throw new HttpError(404, 'Unknown module');
 
+    if (parts[1] === 'template.xlsx' && method === 'GET') {
+      allow(user, 'create', name);
+      const sample = db.prepare(`${selectSql(name)} ORDER BY t.id DESC LIMIT 1`).get();
+      return send(res, 200, templates.templateXlsx(db, name, { company, sample }), xlsxHeaders(`${name}-template.xlsx`));
+    }
+    if (parts[1] === 'import-template' && method === 'POST') {
+      return send(res, 200, await importTemplate(req, url, name, user));
+    }
+    if (parts[1] === 'export.xlsx' && method === 'GET') {
+      allow(user, 'export', name);
+      const file = `${name}-${new Date().toISOString().slice(0, 10)}.xlsx`;
+      return send(res, 200, templates.exportXlsx(name, listRecords(name, url.searchParams), { company }), xlsxHeaders(file));
+    }
     if (parts[1] === 'export.csv' && method === 'GET') {
       allow(user, 'export', name);
       const csv = toCsv(name, listRecords(name, url.searchParams));

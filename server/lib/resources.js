@@ -144,12 +144,15 @@ const resources = {
     fields: [
       { name: 'part_no', label: 'Part number', type: 'text', required: true },
       { name: 'rev', label: 'Rev', type: 'text' },
+      { name: 'kind', label: 'Type', type: 'text', readonly: true },
       { name: 'format', label: 'Format', type: 'text', readonly: true },
+      { name: 'job_traveller_id', label: 'Job Traveller', type: 'ref', ref: 'job_travellers' },
       { name: 'status', label: 'Status', type: 'select', options: ['Current', 'Superseded'], default: 'Current' },
       { name: 'filename', label: 'File', type: 'text', readonly: true },
       { name: 'size', label: 'Size (bytes)', type: 'number', readonly: true, list: false },
       { name: 'stored_name', label: 'Stored as', type: 'text', readonly: true, list: false, hidden: true },
       { name: 'uploaded_by', label: 'Uploaded by', type: 'text', readonly: true },
+      { name: 'notes', label: 'Notes', type: 'text', list: false },
     ],
   },
   maint_orders: {
