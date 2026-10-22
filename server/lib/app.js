@@ -7,9 +7,11 @@ const { ROLES, can, rightsFor, canApprove, canEditLayout, setProcessRights } = r
 const { checkLayout, starterLayout } = require('./layout');
 const auth = require('./auth');
 const { FORMATS, MODEL_FORMATS, MIME, parseDrawingName, safeFilename, checkContent } = require('./drawings');
-const { buildDashboard, MINUTES_PER_DAY } = require('./dashboard');
+const { buildDashboard } = require('./dashboard');
+const worktime = require('./worktime');
 const { readJobTravellers } = require('./jtimport');
 const templates = require('./templates');
+const { writeXlsx } = require('./xlsx');
 
 const VERSION = require('../../package.json').version;
 const PUBLIC_DIR = path.join(__dirname, '..', '..', 'public');
@@ -35,6 +37,7 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
   fs.mkdirSync(drawingsDir, { recursive: true });
   const loadRights = () => setProcessRights(db.prepare('SELECT process, resource FROM process_rights').all());
   loadRights();
+  worktime.seedDefaultShift(db);
   // Older records get their project from the Job Traveller they belong to.
   db.exec(`UPDATE operator_outputs SET project_id = (SELECT project_id FROM job_travellers j WHERE j.id = operator_outputs.job_traveller_id) WHERE project_id IS NULL;
     UPDATE drawings SET project_id = (SELECT project_id FROM job_travellers j WHERE j.id = drawings.job_traveller_id) WHERE project_id IS NULL AND job_traveller_id IS NOT NULL;
@@ -171,6 +174,7 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
           v = String(v).trim();
           noCode(f.label, v);
           if (f.type === 'date' && !/^\d{4}-\d{2}-\d{2}$/.test(v)) { errors.push(`${f.label} must be a date (YYYY-MM-DD)`); continue; }
+          if (f.type === 'time' && !/^([01]\d|2[0-3]):[0-5]\d$/.test(v)) { errors.push(`${f.label} must be a time (HH:MM)`); continue; }
           if (f.type === 'select' && !f.options.includes(v)) { errors.push(`${f.label} must be one of: ${f.options.join(', ')}`); continue; }
         }
       }
@@ -217,6 +221,7 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
   // Fields copied from a linked record: project from the Job Traveller, machine type from the machine.
   function linkFields(name, data, current = {}) {
     const v = (k) => (k in data ? data[k] : current[k]);
+    if (name === 'shifts') data.net_min = worktime.netMinutes({ start_time: v('start_time'), end_time: v('end_time'), break_start: v('break_start'), break_end: v('break_end') });
     if (name === 'schedules' && v('start_date') && v('end_date') && v('end_date') < v('start_date')) throw new HttpError(400, 'End date is before the start date');
     if (name === 'shift_plans') {
       const jt = v('job_traveller_id') ? db.prepare('SELECT project_id FROM job_travellers WHERE id = ?').get(v('job_traveller_id')) : null;
@@ -373,22 +378,20 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
   // ---- schedule ------------------------------------------------------------
 
   // Auto plan: one line per shop process in the project's Job Traveller routing. Days come from the
-  // remaining work (pcs x cycle time / net minutes a day, at least 1). Each process starts one working
-  // day after the one before it, so parts flow on while the first process is still busy. Sundays are off.
+  // remaining work (pcs x cycle time / net minutes a day from Working time, at least 1). Each process
+  // starts one working day after the one before it, so parts flow on while the first one is still busy.
+  // Working days and holidays come from Working time.
   const PROCESS_MACHINE = { LASER: 'Fiber laser', POLISH: 'Polishing/grinding', BEND: 'Press brake', CLINCH: 'Clinching/PEM press', WELD: 'Welding' };
-  function workDay(iso, n) {
-    let d = new Date(`${iso}T00:00:00Z`);
-    const step = () => { d = new Date(d.getTime() + 86400000); };
-    while (d.getUTCDay() === 0) step();
-    for (let i = 0; i < n; i++) { step(); while (d.getUTCDay() === 0) step(); }
-    return d.toISOString().slice(0, 10);
-  }
+
   function autoPlan(body, user) {
     allow(user, 'create', 'schedules');
     const projectId = Number(body.project_id);
     const project = db.prepare('SELECT id, code FROM projects WHERE id = ?').get(projectId);
     if (!project) throw new HttpError(400, 'Project not found');
     const start = /^\d{4}-\d{2}-\d{2}$/.test(body.start_date || '') ? body.start_date : localToday();
+    const isWork = worktime.workDayCheck(db);
+    const workDay = (iso, n) => worktime.addWorkDays(isWork, iso, n);
+    const perDay = worktime.minutesPerDay(db);
     const rows = db.prepare(`
       SELECT p.id, p.code, p.name, p.seq, SUM(COALESCE(s.target_qty, 0)) AS qty,
         SUM(MAX(COALESCE(s.target_qty, 0) - COALESCE(o.good, 0), 0) * COALESCE(s.cycle_min, 0)) AS min
@@ -404,7 +407,7 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
       const ins = db.prepare(`INSERT INTO schedules (project_id, process_id, machine_id, start_date, end_date, planned_qty, status, source, notes)
         VALUES (?, ?, ?, ?, ?, ?, 'Planned', 'Auto plan', ?)`);
       rows.forEach((r, i) => {
-        const days = Math.max(1, Math.ceil((r.min || 0) / MINUTES_PER_DAY));
+        const days = Math.max(1, Math.ceil((r.min || 0) / perDay));
         const from = workDay(start, i);
         const machines = db.prepare('SELECT id FROM machines WHERE machine_type = ?').all(PROCESS_MACHINE[r.code] || '');
         ins.run(projectId, r.id, machines.length === 1 ? machines[0].id : null, from, workDay(from, days - 1), r.qty,
@@ -414,6 +417,78 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
     } catch (err) { db.exec('ROLLBACK'); throw err; }
     audit(user, 'auto-plan', 'schedules', projectId);
     return listRecords('schedules', new URLSearchParams({ project_id: String(projectId) }));
+  }
+
+  // ---- output reports ------------------------------------------------------
+
+  // Hourly output for one day: each Operator roster entry gets its shift's hour slots, a plan per slot
+  // (target qty spread by the minutes in the slot) and the actual good qty the Operator form recorded
+  // for that slot, process, Job Traveller and machine.
+  function hourlyReport(date) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date || '')) date = localToday();
+    const wt = worktime.load(db);
+    const entries = db.prepare(`SELECT r.*, sp.name AS process, m.code AS machine, j.jt_no, j.part_no, p.code AS project
+      FROM shift_plans r JOIN shop_processes sp ON sp.id = r.process_id LEFT JOIN machines m ON m.id = r.machine_id
+      LEFT JOIN job_travellers j ON j.id = r.job_traveller_id LEFT JOIN projects p ON p.id = r.project_id
+      WHERE r.date = ? ORDER BY sp.seq, r.operator`).all(date);
+    const outputs = db.prepare('SELECT process_id, job_traveller_id, machine, slot, good_qty, reject_qty FROM operator_outputs WHERE date = ?').all(date);
+    const rows = entries.map((e) => {
+      const shift = wt.shifts.find((x) => x.name === e.shift) || wt.shifts[0] || { name: e.shift, slots: [], net_min: 0 };
+      const total = shift.slots.reduce((n, x) => n + x.minutes, 0) || 1;
+      const mine = outputs.filter((o) => o.process_id === e.process_id && (!e.job_traveller_id || o.job_traveller_id === e.job_traveller_id)
+        && (!e.machine || !o.machine || o.machine === e.machine));
+      const slots = shift.slots.map((x) => {
+        const hit = mine.filter((o) => String(o.slot || '').endsWith(x.label));
+        return { label: x.label, plan: e.planned_qty ? Math.round((e.planned_qty * x.minutes) / total) : null,
+          actual: hit.length ? hit.reduce((n, o) => n + (o.good_qty || 0), 0) : null, reject: hit.reduce((n, o) => n + (o.reject_qty || 0), 0) };
+      });
+      const actual = slots.reduce((n, x) => n + (x.actual || 0), 0);
+      return { id: e.id, operator: e.operator, shift: shift.name, process_id: e.process_id, process: e.process, machine: e.machine, jt_no: e.jt_no,
+        part_no: e.part_no, project_id: e.project_id, project: e.project, planned_qty: e.planned_qty, actual, reject: slots.reduce((n, x) => n + x.reject, 0),
+        achieved: e.planned_qty ? Math.round((actual / e.planned_qty) * 1000) / 10 : null, slots };
+    });
+    return { date, shifts: wt.shifts.map((x) => ({ name: x.name, slots: x.slots })), rows };
+  }
+
+  // Actual output per process and project over a date range, from the Operator form.
+  function actualReport(q) {
+    const to = /^\d{4}-\d{2}-\d{2}$/.test(q.get('to') || '') ? q.get('to') : localToday();
+    const from = /^\d{4}-\d{2}-\d{2}$/.test(q.get('from') || '') ? q.get('from') : `${to.slice(0, 8)}01`;
+    const where = ['o.date BETWEEN ? AND ?'], params = [from, to];
+    if (Number(q.get('process_id'))) { where.push('o.process_id = ?'); params.push(Number(q.get('process_id'))); }
+    if (Number(q.get('project_id'))) { where.push('o.project_id = ?'); params.push(Number(q.get('project_id'))); }
+    const rows = db.prepare(`SELECT o.id, o.date, o.slot, o.process_id, sp.name AS process, o.project_id, p.code AS project, j.jt_no, j.part_no,
+        o.machine, o.good_qty, o.reject_qty, o.run_min, o.downtime_min, o.reject_code, o.downtime_code, o.operator
+      FROM operator_outputs o JOIN shop_processes sp ON sp.id = o.process_id LEFT JOIN projects p ON p.id = o.project_id
+      LEFT JOIN job_travellers j ON j.id = o.job_traveller_id WHERE ${where.join(' AND ')} ORDER BY o.date, sp.seq, p.code`).all(...params);
+    const sum = (list) => {
+      const good = list.reduce((n, r) => n + (r.good_qty || 0), 0), reject = list.reduce((n, r) => n + (r.reject_qty || 0), 0);
+      return { entries: list.length, good, reject, yield: good + reject ? Math.round((good / (good + reject)) * 1000) / 10 : null,
+        run_min: list.reduce((n, r) => n + (r.run_min || 0), 0), downtime_min: list.reduce((n, r) => n + (r.downtime_min || 0), 0) };
+    };
+    const keys = [...new Set(rows.map((r) => `${r.process}|${r.project || ''}`))];
+    const summary = keys.map((k) => { const [process, project] = k.split('|'); return { process, project: project || null, ...sum(rows.filter((r) => r.process === process && (r.project || '') === project)) }; });
+    return { from, to, rows, summary, total: sum(rows) };
+  }
+
+  function reportXlsx(kind, q) {
+    if (kind === 'hourly') {
+      const r = hourlyReport(q.get('date'));
+      const labels = [...new Set(r.rows.flatMap((x) => x.slots.map((s) => s.label)))];
+      const head = ['Operator', 'Shift', 'Process', 'Project', 'Job Traveller', 'Machine', 'Target', ...labels.flatMap((l) => [`${l} plan`, `${l} actual`]), 'Actual', 'Reject', 'Achieved %'];
+      const body = r.rows.map((x) => [x.operator, x.shift, x.process, x.project, x.jt_no, x.machine, x.planned_qty,
+        ...labels.flatMap((l) => { const s = x.slots.find((y) => y.label === l); return [s ? s.plan : null, s ? s.actual : null]; }), x.actual, x.reject, x.achieved]);
+      return { file: `hourly-output-${r.date}.xlsx`, sheets: [{ name: 'Hourly output', title: `${company} · Hourly output ${r.date}`, rows: [head, ...body], widths: head.map((_, i) => (i < 6 ? 16 : 11)) }],
+        csv: [head, ...body] };
+    }
+    const r = actualReport(q);
+    const sHead = ['Process', 'Project', 'Entries', 'Good', 'Reject', 'Yield %', 'Run (min)', 'Downtime (min)'];
+    const sBody = r.summary.map((x) => [x.process, x.project || 'No project', x.entries, x.good, x.reject, x.yield, x.run_min, x.downtime_min]);
+    const dHead = ['Date', 'Slot', 'Process', 'Project', 'Job Traveller', 'Part', 'Machine', 'Good', 'Reject', 'Run (min)', 'Downtime (min)', 'Reject code', 'Downtime code', 'Operator'];
+    const dBody = r.rows.map((x) => [x.date, x.slot, x.process, x.project, x.jt_no, x.part_no, x.machine, x.good_qty, x.reject_qty, x.run_min, x.downtime_min, x.reject_code, x.downtime_code, x.operator]);
+    return { file: `actual-output-${r.from}-to-${r.to}.xlsx`, csv: [dHead, ...dBody], sheets: [
+      { name: 'By process and project', title: `${company} · Actual output ${r.from} to ${r.to}`, rows: [sHead, ...sBody], widths: [18, 16, 9, 10, 10, 9, 11, 14] },
+      { name: 'Detail', rows: [dHead, ...dBody], widths: dHead.map(() => 14) }] };
   }
 
   // ---- drawings -----------------------------------------------------------
@@ -912,6 +987,22 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
       return send(res, 200, { resources: meta, formats: FORMATS, roles: ROLES, processes: PROCESSES, company });
     }
     if (parts[0] === 'dashboard' && method === 'GET') return send(res, 200, buildDashboard(db));
+    if (parts[0] === 'worktime' && method === 'GET') return send(res, 200, worktime.load(db));
+    if (parts[0] === 'reports' && method === 'GET') {
+      allow(user, 'read', 'operator_outputs');
+      const [kind, ext] = String(parts[1] || '').split('.');
+      if (!['hourly', 'actual'].includes(kind)) throw new HttpError(404, 'Not found');
+      if (!ext) return send(res, 200, kind === 'hourly' ? hourlyReport(url.searchParams.get('date')) : actualReport(url.searchParams));
+      allow(user, 'export', 'operator_outputs');
+      const x = reportXlsx(kind, url.searchParams);
+      if (ext === 'xlsx') return send(res, 200, writeXlsx(x.sheets), xlsxHeaders(x.file));
+      if (ext === 'csv') {
+        const esc = (v) => (v === null || v === undefined ? '' : /[",\r\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : String(v));
+        return send(res, 200, '\ufeff' + x.csv.map((r) => r.map(esc).join(',')).join('\r\n') + '\r\n',
+          { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `attachment; filename="${x.file.replace('.xlsx', '.csv')}"` });
+      }
+      throw new HttpError(404, 'Not found');
+    }
     if (parts[0] === 'rights') return handleRights(req, res, method, user);
     if (parts[0] === 'users') return handleUsers(req, res, method, parts[1] ? Number(parts[1]) : null, user);
     if (parts[0] === 'audit' && method === 'GET') {

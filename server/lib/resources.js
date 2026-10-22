@@ -249,7 +249,7 @@ const resources = {
     display: 'operator',
     fields: [
       { name: 'date', label: 'Date', type: 'date', required: true },
-      { name: 'shift', label: 'Shift', type: 'select', options: ['Day', 'Night', 'Overtime'], default: 'Day', required: true },
+      { name: 'shift', label: 'Shift', type: 'text', default: 'Day', required: true, help: 'A shift name from Working time, or Overtime.' },
       { name: 'operator', label: 'Operator', type: 'text', required: true },
       { name: 'process_id', label: 'Process', type: 'ref', ref: 'shop_processes', required: true },
       { name: 'machine_id', label: 'Machine', type: 'ref', ref: 'machines' },
@@ -258,6 +258,32 @@ const resources = {
       { name: 'planned_qty', label: 'Target qty', type: 'number' },
       { name: 'hours', label: 'Hours', type: 'number', default: 7.75 },
       { name: 'notes', label: 'Notes', type: 'text', list: false },
+    ],
+  },
+  // Working time (Admin): each shift's hours and break, and the days it runs.
+  shifts: {
+    label: 'Shifts', singular: 'Shift', group: 'Admin', nav: false,
+    write: ['admin'],
+    display: 'name',
+    fields: [
+      { name: 'name', label: 'Shift', type: 'text', required: true, unique: true },
+      { name: 'start_time', label: 'Start', type: 'time', required: true },
+      { name: 'end_time', label: 'End', type: 'time', required: true, help: 'An end before the start runs past midnight (night shift).' },
+      { name: 'break_start', label: 'Break from', type: 'time' },
+      { name: 'break_end', label: 'Break to', type: 'time' },
+      { name: 'days', label: 'Working days', type: 'select', options: ['Mon-Fri', 'Mon-Sat', 'Mon-Sun'], default: 'Mon-Sat', required: true },
+      { name: 'active', label: 'Active', type: 'select', options: ['Yes', 'No'], default: 'Yes' },
+      { name: 'net_min', label: 'Net minutes', type: 'number', readonly: true },
+    ],
+  },
+  holidays: {
+    label: 'Holidays', singular: 'Holiday', group: 'Admin', nav: false,
+    write: ['admin'],
+    display: 'name',
+    fields: [
+      { name: 'date', label: 'Date', type: 'date', required: true, unique: true },
+      { name: 'name', label: 'Holiday', type: 'text', required: true },
+      { name: 'kind', label: 'Type', type: 'select', options: ['Public holiday', 'Company leave', 'Shutdown'], default: 'Public holiday' },
     ],
   },
   // One line per PM item checked on a date, so each machine keeps a dated care record.
@@ -469,10 +495,40 @@ for (const [name, list] of Object.entries(OWNERS)) resources[name].processes = l
 const SLICERS = {
   projects: ['status', 'customer'], parts: ['project_id', 'make_buy'], nestings: ['project_id', 'material'], nesting_parts: ['nesting_id'],
   routings: ['machine_id'], wf_steps: ['status'], machines: ['machine_type', 'brand'], tooling: ['tool_type', 'machine_type'],
-  plates: ['project_id', 'material'], drawings: ['project_id', 'kind'], maint_orders: ['machine_id', 'kind'], pm_tasks: ['machine_id', 'frequency'], pm_logs: ['machine_id', 'result'], schedules: ['project_id', 'process_id'], shift_plans: ['project_id', 'process_id'],
+  plates: ['project_id', 'material'], drawings: ['project_id', 'kind'], maint_orders: ['machine_id', 'kind'], pm_tasks: ['machine_id', 'frequency'], pm_logs: ['machine_id', 'result'], schedules: ['project_id', 'process_id'], shift_plans: ['project_id', 'process_id'], holidays: ['kind'],
   ncrs: ['project_id', 'status'], reason_codes: ['kind'], job_travellers: ['project_id', 'status'], operator_outputs: ['project_id', 'process_id'],
   daily_logs: ['project_id', 'process'], inventory_items: ['item_group', 'status'], inventory_moves: ['move'], issues: ['to_process', 'status'],
 };
 for (const [name, list] of Object.entries(SLICERS)) resources[name].slicers = list;
+
+// Sections: each list page splits its columns into separate tables (tabs) so one kind of
+// information is read at a time. The record's key column is shown in every section.
+const SECTIONS = {
+  projects: { Overview: ['code', 'name', 'customer', 'status'], Dates: ['code', 'work_order', 'start_date', 'due_date', 'status'], Notes: ['code', 'notes'] },
+  parts: { Part: ['part_no', 'project_id', 'parent_no', 'description', 'category', 'make_buy'], Material: ['part_no', 'material', 'thickness', 'flat_size', 'finish'], Quantity: ['part_no', 'qty_per_set', 'sets', 'job_sheet'], Engineering: ['part_no', 'drawing_no', 'process_flow', 'hardware'] },
+  nestings: { Program: ['program', 'project_id', 'material', 'thickness', 'sheet_size'], 'Cutting time': ['program', 'sheets', 'cut_min'], 'Part numbers': ['program', 'part_count', 'part_qty', 'parts'] },
+  machines: { Machine: ['code', 'name', 'machine_type', 'status'], 'Brand & model': ['code', 'brand', 'model', 'notes'], Location: ['code', 'location', 'status'] },
+  tooling: { Tool: ['code', 'description', 'tool_type', 'condition'], Machine: ['code', 'machine_type', 'machine_id', 'location'] },
+  plates: { Plate: ['material', 'project_id', 'thickness', 'sheet_size'], Stock: ['material', 'thickness', 'qty', 'min_qty', 'location'] },
+  drawings: { Drawing: ['filename', 'project_id', 'part_no', 'rev', 'status'], File: ['filename', 'kind', 'format', 'size', 'uploaded_by'], Links: ['filename', 'job_traveller_id', 'notes'] },
+  maint_orders: { 'Work order': ['title', 'machine_id', 'kind', 'status', 'pic'], Time: ['title', 'opened', 'closed', 'downtime_min'], Details: ['title', 'details'] },
+  pm_tasks: { Item: ['task', 'machine_id', 'frequency', 'item_no'], Procedure: ['task', 'procedure', 'standard'], 'Last check': ['task', 'status', 'checked_on', 'checked_by', 'remarks'] },
+  schedules: { Plan: ['start_date', 'project_id', 'process_id', 'job_traveller_id', 'machine_id'], Dates: ['start_date', 'end_date', 'planned_qty', 'status', 'source'] },
+  shift_plans: { Operator: ['operator', 'date', 'shift', 'process_id', 'machine_id'], Work: ['operator', 'job_traveller_id', 'project_id', 'planned_qty', 'hours'] },
+  ncrs: { NCR: ['ncr_no', 'date', 'project_id', 'part_no', 'qty_affected', 'status'], '8D': ['ncr_no', 'defect', 'containment', 'root_cause', 'corrective'], Closure: ['ncr_no', 'disposition', 'verification', 'raised_by', 'status'] },
+  job_travellers: { 'Job Traveller': ['jt_no', 'project_id', 'customer', 'status'], Part: ['jt_no', 'part_no', 'drawing_no', 'description', 'material', 'thickness'], Quantity: ['jt_no', 'qty', 'due_date', 'status'], Approval: ['jt_no', 'approved_by', 'approved_on', 'notes'] },
+  operator_outputs: { Job: ['date', 'project_id', 'process_id', 'job_traveller_id', 'operator'], Output: ['date', 'slot', 'machine', 'good_qty', 'reject_qty', 'reject_code'], Time: ['date', 'slot', 'run_min', 'downtime_min', 'downtime_code', 'remark'] },
+  daily_logs: { Activity: ['date', 'project_id', 'process', 'part_no', 'activity', 'status'], Time: ['date', 'hours', 'logged_by'], Handover: ['date', 'handover_to', 'handover_note'] },
+  inventory_items: { Item: ['code', 'name', 'item_group', 'category', 'unit'], Stock: ['code', 'qty_on_hand', 'min_qty', 'status', 'location'], 'Used by': ['code', 'process', 'machine_id', 'notes'] },
+  inventory_moves: { Movement: ['date', 'item_id', 'move', 'qty', 'moved_by'], 'Used at': ['date', 'process', 'machine_id', 'maint_order_id', 'remark'] },
+  issues: { Issue: ['issue_no', 'title', 'priority', 'status', 'raised_by'], Processes: ['issue_no', 'from_process', 'to_process', 'project_id', 'part_no', 'job_traveller_id'], Dates: ['issue_no', 'opened', 'due_date', 'resolved'], Solution: ['issue_no', 'details', 'action_plan', 'resolution'] },
+};
+for (const [name, map] of Object.entries(SECTIONS)) {
+  const known = new Set(resources[name].fields.map((f) => f.name));
+  resources[name].sections = Object.entries(map).map(([label, fields]) => {
+    for (const f of fields) if (!known.has(f)) throw new Error(`Section ${name}.${label}: unknown field ${f}`);
+    return { label, fields };
+  });
+}
 
 module.exports = { resources, columnType, TOOL_TYPES, MACHINE_TYPES, MATERIALS, PROCESSES, MOVE_SIGN };

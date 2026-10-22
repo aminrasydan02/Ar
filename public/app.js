@@ -100,12 +100,17 @@ async function buildInput(field, value, editable) {
     return h('select', attrs, h('option', { value: '' }, ''),
       field.options.map((o) => h('option', { value: o, selected: o === value }, o)));
   }
+  if (field.name === 'shift' && state.worktime) {
+    const names = [...state.worktime.shifts.map((x) => x.name), 'Overtime'];
+    if (value && !names.includes(value)) names.push(value);
+    return h('select', attrs, names.map((o) => h('option', { value: o, selected: o === (value || names[0]) }, o)));
+  }
   if (field.type === 'ref') {
     const opts = await refOptions(field.ref);
     return h('select', attrs, h('option', { value: '' }, ''),
       opts.map((o) => h('option', { value: o.id, selected: o.id === value }, o.label)));
   }
-  return h('input', { ...attrs, type: field.type === 'number' ? 'number' : field.type === 'date' ? 'date' : 'text',
+  return h('input', { ...attrs, type: field.type === 'number' ? 'number' : field.type === 'date' ? 'date' : field.type === 'time' ? 'time' : 'text',
     step: field.type === 'number' ? 'any' : null, value: value ?? '' });
 }
 
@@ -230,7 +235,23 @@ const daysBetweenIso = (a, b) => Math.round((Date.parse(`${b}T00:00:00Z`) - Date
 
 function recordTable(resName, { filter = {}, extra = [], rowActions, columns, onRow, slicerSlot, noneLabel, onLoad, skipSlicers = [] } = {}) {
   const res = state.meta.resources[resName];
-  const fields = res.fields.filter((f) => f.list !== false && (!columns || columns.includes(f.name)));
+  const allFields = res.fields.filter((f) => f.list !== false && (!columns || columns.includes(f.name)));
+  // Sections split the columns into separate tables, one kind of information per tab.
+  const sections = !columns && res.sections ? [...res.sections, { label: 'All columns', fields: allFields.map((f) => f.name) }] : null;
+  const tabKey = `sec:${resName}`;
+  let tab = 0;
+  try { tab = Math.min(Number(localStorage.getItem(tabKey)) || 0, sections ? sections.length - 1 : 0); } catch {}
+  let fields = allFields;
+  const tabBar = h('div', { class: 'sec-tabs', role: 'tablist', 'aria-label': `${res.label} sections` });
+  function pickSection(i) {
+    tab = i;
+    try { localStorage.setItem(tabKey, String(i)); } catch {}
+    const names = sections[i].fields;
+    fields = names.map((n) => res.fields.find((f) => f.name === n)).filter((f) => f && !f.hidden);
+    tabBar.replaceChildren(...sections.map((sec, j) => h('button', { type: 'button', role: 'tab', class: `sec-tab${j === i ? ' on' : ''}`, 'aria-selected': String(j === i),
+      onclick: () => { pickSection(j); draw(); } }, sec.label, h('span', { class: 'n' }, sec.fields.length))));
+  }
+  if (sections) pickSection(tab);
   const slicers = (res.slicers || []).filter((n) => !(n in filter) && !skipSlicers.includes(n)).map((n) => res.fields.find((f) => f.name === n)).filter(Boolean);
   const picked = {};
   const wrap = h('div');
@@ -273,7 +294,7 @@ function recordTable(resName, { filter = {}, extra = [], rowActions, columns, on
     if (!shown.length) { tableBox.replaceChildren(h('div', { class: 'empty' }, rows.length ? 'Nothing matches this selection.' : 'No records yet.')); return; }
     const span = fields.length + (rowActions ? 1 : 0);
     const line = (r) => h('tr', { class: 'click', onclick: () => (onRow ? onRow(r, load) : editRecord(resName, r, null, load)) },
-      fields.map((f) => h('td', { class: f.type === 'number' ? 'num' : '' }, cellValue(f, r))),
+      fields.map((f) => h('td', { class: f.type === 'number' ? 'num' : f.type === 'textarea' ? 'long' : '' }, cellValue(f, r))),
       rowActions ? h('td', { onclick: (e) => e.stopPropagation() }, rowActions(r, load)) : null);
     const g = slicers[0];
     let body;
@@ -311,7 +332,7 @@ function recordTable(resName, { filter = {}, extra = [], rowActions, columns, on
     right(resName, 'export') ? h('a', { class: 'btn', href: `/api/${resName}/export.xlsx?${new URLSearchParams(filter)}` }, 'Export Excel') : null,
     right(resName, 'export') ? h('a', { class: 'btn', href: `/api/${resName}/export.csv?${new URLSearchParams(filter)}` }, 'CSV') : null,
     right(resName, 'create') && !res.noCreate ? h('button', { class: 'btn primary', onclick: () => (onRow ? onRow(null, load) : editRecord(resName, null, { ...filter, ...presetFromSlicers() }, load)) }, `+ New ${res.singular}`) : null),
-    tableBox);
+    ...(sections ? [tabBar] : []), tableBox);
   // A new record starts in the project or machine picked on the slicer.
   function presetFromSlicers() {
     const out = {};
@@ -668,7 +689,7 @@ async function viewRoster() {
         p.name, h('span', { class: 'n' }, inWeek.filter((r) => r.process_id === p.id).length)))))));
 
   const today = localToday();
-  const entry = (r) => h('button', { type: 'button', class: `ros-e shift-${r.shift.toLowerCase()}`, onclick: () => editRecord('shift_plans', r, null, () => route()),
+  const entry = (r) => h('button', { type: 'button', class: `ros-e shift-${String(r.shift || '').toLowerCase().replace(/[^a-z0-9]+/g, '-')}`, onclick: () => editRecord('shift_plans', r, null, () => route()),
     title: `${r.operator} · ${r.shift} · ${r.process_id__label}${r.machine_id__label ? ` · ${r.machine_id__label}` : ''}` },
     h('strong', {}, r.process_id__label), h('small', {}, [r.shift, r.machine_id__label, r.job_traveller_id__label].filter(Boolean).join(' · ')),
     r.planned_qty ? h('small', {}, `${fmtNum(r.planned_qty)} pcs · ${fmtNum(r.hours)} h`) : null);
@@ -686,6 +707,156 @@ async function viewRoster() {
     canPlan ? h('div', { class: 'toolbar' }, h('span', { class: 'grow' }), h('button', { class: 'btn primary', onclick: () => add(today >= days[0] && today <= days[6] ? today : days[0], '') }, '+ Plan operator')) : null,
     grid,
     h('p', { class: 'muted small' }, 'Click an entry to change it. Day, Night and Overtime shifts have their own colour.')];
+}
+
+// ---------- Admin: working time --------------------------------------------------
+
+async function viewWorktime() {
+  const wt = await api('GET', '/api/worktime');
+  state.worktime = wt;
+  const head = pageHead('Working time', 'clock', 'Shifts, working hours and holidays. Used by the hour slots, hourly output, dashboard and auto plan.');
+  const stat = (ic, v, l, tone) => h('div', { class: `stat ${tone}` }, h('span', { class: 'stat-i' }, icon(ic)), h('div', {}, h('div', { class: 'stat-n' }, v), h('div', { class: 'stat-l' }, l)));
+  const upcoming = wt.holidays.filter((x) => x.date >= localToday());
+  const shiftCards = wt.shifts.map((sh) => h('section', { class: 'dcard' },
+    h('div', { class: 'dcard-h' }, h('span', { class: 'dcard-i' }, icon('clock')), h('h2', {}, `${sh.name} shift`),
+      h('span', { class: 'muted small' }, `${sh.start_time}–${sh.end_time}${sh.break_start ? ` · break ${sh.break_start}–${sh.break_end}` : ''} · ${sh.days}`)),
+    h('div', { class: 'chips' }, sh.slots.map((x) => h('span', { class: 'chip static' }, x.label, h('span', { class: 'n' }, `${x.minutes}m`)))),
+    h('p', { class: 'muted small' }, `${sh.slots.length} hour slots · ${sh.net_min} net minutes`)));
+  const reload = () => { start().catch(() => route()); };
+  return [head,
+    h('div', { class: 'stat-grid' },
+      stat('users', String(wt.shifts.length), 'Active shifts', 't1'),
+      stat('clock', fmtNum(wt.minutes_per_day), 'Net minutes a day', 't2'),
+      stat('cal', String(upcoming.length), 'Holidays ahead', 't3'),
+      stat('flow', upcoming[0] ? fmtDate(upcoming[0].date) : '—', upcoming[0] ? `Next: ${upcoming[0].name}` : 'Next holiday', 't4')),
+    h('div', { class: 'dgrid' }, shiftCards),
+    h('h2', {}, 'Shifts'),
+    h('p', { class: 'muted small' }, 'Add a shift for each working pattern (for example Day and Night). Set Active to No to stop using one. An end time before the start runs past midnight.'),
+    recordTable('shifts', { onLoad: () => {} }),
+    h('h2', {}, 'Holidays and leave'),
+    recordTable('holidays'),
+    h('div', { class: 'toolbar gap-top' }, h('span', { class: 'grow' }), h('button', { class: 'btn', onclick: reload }, 'Apply changes to this session'))];
+}
+
+// ---------- Hourly output (plan from the roster vs actual) ------------------------
+
+const achieveTone = (p) => (p === null || p === undefined ? '' : p >= 95 ? 'ok' : p >= 80 ? 'warn' : 'bad');
+
+async function viewHourly() {
+  const qs = new URLSearchParams(location.hash.split('?')[1] || '');
+  const date = qs.get('date') || localToday();
+  const proc = qs.get('process') || '';
+  const pick = qs.get('project') || '';
+  const r = await api('GET', `/api/reports/hourly?date=${date}`);
+  const projects = await api('GET', '/api/projects');
+  projCache = projects;
+  const go = (ch) => { const n = new URLSearchParams({ date, process: proc, project: pick, ...ch }); for (const [k, v] of [...n]) if (!v) n.delete(k); location.hash = `#/hourly?${n}`; };
+  const dateIn = h('input', { type: 'date', value: date, 'aria-label': 'Date', onchange: (e) => go({ date: e.target.value }) });
+  const head = pageHead('Hourly output', 'clock', 'Plan per hour from the Operator roster, actual from the Operator form', dateIn,
+    right('operator_outputs', 'export') ? [h('a', { class: 'btn', href: `/api/reports/hourly.xlsx?date=${date}` }, 'Export Excel'), h('a', { class: 'btn', href: `/api/reports/hourly.csv?date=${date}` }, 'CSV')] : null);
+  const procs = [...new Set(r.rows.map((x) => x.process))];
+  const codes = [...new Set(r.rows.map((x) => x.project).filter(Boolean))];
+  head.append(h('div', { class: 'slicers' },
+    h('div', { class: 'slicer' }, h('span', { class: 'slicer-l' }, 'Process'), h('div', { class: 'chips' },
+      h('button', { type: 'button', class: `chip${!proc ? ' on' : ''}`, onclick: () => go({ process: '' }) }, 'All', h('span', { class: 'n' }, r.rows.length)),
+      procs.map((p) => h('button', { type: 'button', class: `chip${proc === p ? ' on' : ''}`, onclick: () => go({ process: proc === p ? '' : p }) }, p, h('span', { class: 'n' }, r.rows.filter((x) => x.process === p).length))))),
+    codes.length ? h('div', { class: 'slicer proj' }, h('span', { class: 'slicer-l' }, 'Project'), h('div', { class: 'pbubs' },
+      h('button', { type: 'button', class: `chip${!pick ? ' on' : ''}`, onclick: () => go({ project: '' }) }, 'All projects', h('span', { class: 'n' }, codes.length)),
+      codes.map((c) => projectBubble(c, r.rows.filter((x) => x.project === c).length, pick === c, () => go({ project: pick === c ? '' : c }))))) : null));
+  const rows = r.rows.filter((x) => (!proc || x.process === proc) && (!pick || x.project === pick));
+  if (!rows.length) return [head, h('div', { class: 'empty panel' }, r.rows.length ? 'Nothing matches this selection.' : `No operators on the roster for ${fmtDate(date)}. The Supervisor plans them on the Operator roster page.`)];
+
+  const tables = [...new Set(rows.map((x) => x.shift))].map((shift) => {
+    const list = rows.filter((x) => x.shift === shift);
+    const labels = ((r.shifts.find((x) => x.name === shift) || {}).slots || list[0].slots).map((x) => x.label);
+    const cell = (s) => {
+      if (!s) return h('td', {});
+      const p = s.plan ? Math.round(((s.actual || 0) / s.plan) * 100) : null;
+      return h('td', { class: `hr-c ${s.actual === null ? '' : achieveTone(p)}` }, h('strong', {}, s.actual ?? '·'), h('small', {}, s.plan ? `/${s.plan}` : ''));
+    };
+    const tot = (l) => {
+      const ss = list.map((x) => x.slots.find((y) => y.label === l)).filter(Boolean);
+      const plan = ss.reduce((n, x) => n + (x.plan || 0), 0), act = ss.reduce((n, x) => n + (x.actual || 0), 0);
+      return h('td', { class: `hr-c ${ss.some((x) => x.actual !== null) ? achieveTone(plan ? (act / plan) * 100 : null) : ''}` }, h('strong', {}, fmtNum(act)), h('small', {}, `/${fmtNum(plan)}`));
+    };
+    const plan = list.reduce((n, x) => n + (x.planned_qty || 0), 0), act = list.reduce((n, x) => n + x.actual, 0);
+    return h('section', { class: 'dcard gap-top' },
+      h('div', { class: 'dcard-h' }, h('span', { class: 'dcard-i' }, icon('clock')), h('h2', {}, `${shift} shift · ${fmtDate(date)}`),
+        h('span', { class: `pill ${achieveTone(plan ? (act / plan) * 100 : null)}` }, `${fmtNum(act)} / ${fmtNum(plan)} pcs`)),
+      h('div', { class: 'table-wrap flat' }, h('table', { class: 'hourly' },
+        h('thead', {}, h('tr', {}, h('th', {}, 'Operator'), h('th', {}, 'Process / machine'), h('th', {}, 'Job Traveller'), labels.map((l) => h('th', { class: 'num' }, l.replace('-', '–'))),
+          h('th', { class: 'num' }, 'Actual / target'), h('th', { class: 'num' }, 'Achieved'))),
+        h('tbody', {}, list.map((x) => h('tr', {}, h('th', {}, x.operator),
+          h('td', {}, x.process, x.machine ? h('div', { class: 'muted small' }, x.machine) : null),
+          h('td', {}, x.jt_no || '—', x.project ? h('div', { class: 'muted small' }, dot(projectColour(x.project)), x.project) : null),
+          labels.map((l) => cell(x.slots.find((y) => y.label === l))),
+          h('td', { class: 'num' }, h('strong', {}, fmtNum(x.actual)), ` / ${fmtNum(x.planned_qty) || '—'}`),
+          h('td', { class: 'num' }, x.achieved === null ? '—' : h('span', { class: `pill ${achieveTone(x.achieved)}` }, fmtPct(x.achieved)))))),
+        h('tfoot', {}, h('tr', {}, h('th', {}, 'Total'), h('td', {}), h('td', {}), labels.map(tot),
+          h('td', { class: 'num' }, h('strong', {}, fmtNum(act)), ` / ${fmtNum(plan)}`), h('td', { class: 'num' }, plan ? fmtPct((act / plan) * 100) : '—'))))));
+  });
+  return [head, h('p', { class: 'muted small' }, 'Each cell: actual good pcs / planned pcs for that hour. Green 95% and over, amber 80–95%, red under 80%. The plan spreads the roster target over the shift by the minutes in each hour.'), tables];
+}
+
+// ---------- Actual output by process and project ----------------------------------
+
+async function viewActual() {
+  const qs = new URLSearchParams(location.hash.split('?')[1] || '');
+  const to = qs.get('to') || localToday();
+  const from = qs.get('from') || `${to.slice(0, 8)}01`;
+  const proc = qs.get('process') || '';
+  const pick = qs.get('project') || '';
+  const [r, projects] = await Promise.all([api('GET', `/api/reports/actual?from=${from}&to=${to}`), api('GET', '/api/projects')]);
+  projCache = projects;
+  const go = (ch) => { const n = new URLSearchParams({ from, to, process: proc, project: pick, ...ch }); for (const [k, v] of [...n]) if (!v) n.delete(k); location.hash = `#/actual?${n}`; };
+  const fromIn = h('input', { type: 'date', value: from, 'aria-label': 'From', onchange: (e) => go({ from: e.target.value }) });
+  const toIn = h('input', { type: 'date', value: to, 'aria-label': 'To', onchange: (e) => go({ to: e.target.value }) });
+  const proj = projects.find((p) => p.code === pick);
+  const procRow = r.rows.find((x) => x.process === proc);
+  const exportQs = new URLSearchParams({ from, to, ...(procRow ? { process_id: procRow.process_id } : {}), ...(proj ? { project_id: proj.id } : {}) });
+  const head = pageHead('Actual output', 'pulse', `From the Operator form, ${fmtDate(from)} to ${fmtDate(to)}`, fromIn, toIn,
+    right('operator_outputs', 'export') ? [h('a', { class: 'btn', href: `/api/reports/actual.xlsx?${exportQs}` }, 'Export Excel'), h('a', { class: 'btn', href: `/api/reports/actual.csv?${exportQs}` }, 'CSV')] : null);
+  const procs = [...new Set(r.rows.map((x) => x.process))];
+  const codes = [...new Set(r.rows.map((x) => x.project || ''))];
+  head.append(h('div', { class: 'slicers' },
+    h('div', { class: 'slicer' }, h('span', { class: 'slicer-l' }, 'Process'), h('div', { class: 'chips' },
+      h('button', { type: 'button', class: `chip${!proc ? ' on' : ''}`, onclick: () => go({ process: '' }) }, 'All', h('span', { class: 'n' }, procs.length)),
+      procs.map((p) => h('button', { type: 'button', class: `chip${proc === p ? ' on' : ''}`, onclick: () => go({ process: proc === p ? '' : p }) }, p,
+        h('span', { class: 'n' }, fmtNum(r.rows.filter((x) => x.process === p).reduce((n, x) => n + (x.good_qty || 0), 0))))))),
+    h('div', { class: 'slicer proj' }, h('span', { class: 'slicer-l' }, 'Project'), h('div', { class: 'pbubs' },
+      h('button', { type: 'button', class: `chip${!pick ? ' on' : ''}`, onclick: () => go({ project: '' }) }, 'All projects', h('span', { class: 'n' }, codes.length)),
+      codes.map((c) => projectBubble(c, `${fmtNum(r.rows.filter((x) => (x.project || '') === c).reduce((n, x) => n + (x.good_qty || 0), 0))} pcs`, pick === c, () => go({ project: pick === c ? '' : c }), 'No project'))),
+      pick ? projectPanel(pick, r.rows.filter((x) => x.project === pick).length) : null)));
+  const rows = r.rows.filter((x) => (!proc || x.process === proc) && (!pick || (x.project || '') === pick));
+  const sum = (list, k) => list.reduce((n, x) => n + (x[k] || 0), 0);
+  const good = sum(rows, 'good_qty'), rej = sum(rows, 'reject_qty');
+  const stat = (ic, v, l, tone) => h('div', { class: `stat ${tone}` }, h('span', { class: 'stat-i' }, icon(ic)), h('div', {}, h('div', { class: 'stat-n' }, v), h('div', { class: 'stat-l' }, l)));
+  // Process × project matrix of good pcs.
+  const mProcs = [...new Set(rows.map((x) => x.process))], mCodes = [...new Set(rows.map((x) => x.project || ''))];
+  const matrix = rows.length ? h('section', { class: 'dcard gap-top' },
+    h('div', { class: 'dcard-h' }, h('span', { class: 'dcard-i' }, icon('grid')), h('h2', {}, 'Good pcs by process and project')),
+    h('div', { class: 'table-wrap flat' }, h('table', {},
+      h('thead', {}, h('tr', {}, h('th', {}, 'Process'), mCodes.map((c) => h('th', { class: 'num' }, c ? [dot(projectColour(c)), c] : 'No project')), h('th', { class: 'num' }, 'Total'), h('th', { class: 'num' }, 'Reject'), h('th', { class: 'num' }, 'Yield'))),
+      h('tbody', {}, mProcs.map((p) => {
+        const pr = rows.filter((x) => x.process === p), g = sum(pr, 'good_qty'), rj = sum(pr, 'reject_qty');
+        return h('tr', {}, h('th', {}, p), mCodes.map((c) => h('td', { class: 'num' }, fmtNum(sum(pr.filter((x) => (x.project || '') === c), 'good_qty')) || '—')),
+          h('td', { class: 'num' }, h('strong', {}, fmtNum(g))), h('td', { class: 'num' }, fmtNum(rj)), h('td', { class: 'num' }, g + rj ? fmtPct((g / (g + rj)) * 100) : '—'));
+      }))))) : null;
+  const detail = rows.length ? h('section', { class: 'dcard gap-top' },
+    h('div', { class: 'dcard-h' }, h('span', { class: 'dcard-i' }, icon('list')), h('h2', {}, 'Detail'), h('span', { class: 'muted small' }, `${rows.length} entries`)),
+    h('div', { class: 'table-wrap flat' }, h('table', {},
+      h('thead', {}, h('tr', {}, ['Date', 'Hour slot', 'Process', 'Project', 'Job Traveller', 'Machine', 'Good', 'Reject', 'Run (min)', 'Down (min)', 'Operator'].map((t, i) => h('th', { class: i >= 6 && i <= 9 ? 'num' : '' }, t)))),
+      h('tbody', {}, [...new Set(rows.map((x) => x.project || ''))].map((c) => [
+        h('tr', { class: 'group' }, h('td', { colspan: 11 }, c ? dot(projectColour(c)) : null, h('strong', {}, c || 'No project'), h('span', { class: 'muted' }, ` · ${fmtNum(sum(rows.filter((x) => (x.project || '') === c), 'good_qty'))} good pcs`))),
+        rows.filter((x) => (x.project || '') === c).map((x) => h('tr', {}, h('td', {}, fmtDate(x.date)), h('td', {}, x.slot || ''), h('td', {}, x.process), h('td', {}, x.project || ''),
+          h('td', {}, x.jt_no || ''), h('td', {}, x.machine || ''), h('td', { class: 'num' }, fmtNum(x.good_qty)), h('td', { class: 'num' }, fmtNum(x.reject_qty)),
+          h('td', { class: 'num' }, fmtNum(x.run_min)), h('td', { class: 'num' }, fmtNum(x.downtime_min)), h('td', {}, x.operator || '')))]))))) :
+    h('div', { class: 'empty panel gap-top' }, 'No output recorded for this selection.');
+  return [head,
+    h('div', { class: 'stat-grid' }, stat('check', fmtNum(good), 'Good pcs', 't2'), stat('alert', fmtNum(rej), 'Reject pcs', rej ? 'alert' : 't2'),
+      stat('pulse', good + rej ? fmtPct((good / (good + rej)) * 100) : '—', 'Yield', 't1'), stat('clock', fmtNum(sum(rows, 'run_min') / 60, 1), 'Run hours', 't3'),
+      stat('gear', fmtNum(sum(rows, 'downtime_min')), 'Downtime (min)', 't4')),
+    matrix, detail];
 }
 
 // ---------- PM check by date ---------------------------------------------------
@@ -825,7 +996,7 @@ const ICONS = {
 // The icon shown beside each page title.
 const PAGE_ICONS = {
   projects: 'folder', parts: 'box', routings: 'route', nestings: 'nest', nesting_parts: 'nest', wf_steps: 'flow', machines: 'gear', tooling: 'wrench',
-  plates: 'layers', drawings: 'draw', maint_orders: 'wrench', pm_tasks: 'clip', pm_logs: 'cal', pm: 'clip', schedules: 'gantt', plan: 'gantt', shift_plans: 'users', roster: 'users', ncrs: 'alert', reason_codes: 'tag', job_travellers: 'jt', jt_steps: 'jt',
+  plates: 'layers', drawings: 'draw', maint_orders: 'wrench', pm_tasks: 'clip', pm_logs: 'cal', pm: 'clip', schedules: 'gantt', plan: 'gantt', worktime: 'clock', shifts: 'clock', holidays: 'cal', hourly: 'clock', actual: 'pulse', shift_plans: 'users', roster: 'users', ncrs: 'alert', reason_codes: 'tag', job_travellers: 'jt', jt_steps: 'jt',
   operator_outputs: 'form', daily_logs: 'cal', inventory_items: 'box', inventory_moves: 'list', issues: 'chat', shop_processes: 'pulse',
   '': 'grid', daily: 'board', issue: 'chat', jt: 'jt', operator: 'form', find: 'search', layout: 'layout', 'project-new': 'plus', project: 'folder',
   ncr: 'alert', users: 'users', audit: 'clock', rights: 'shield', account: 'user', nesting: 'nest',
@@ -1649,7 +1820,7 @@ async function outputForm(row, preset, onSaved, onCancel) {
     h('div', {}, h('label', {}, 'Process *'), procSel),
     h('div', {}, h('label', {}, 'Job Traveller *'), jtSel, targetNote),
     h('div', {}, h('label', {}, 'Date *'), txt('date', v.date, 'date')),
-    h('div', {}, h('label', {}, 'Session / time slot'), txt('slot', v.slot)),
+    h('div', {}, h('label', {}, 'Hour slot'), slotSelect(v.slot, !row)),
     h('div', {}, h('label', {}, 'Good qty *'), num('good_qty', v.good_qty)),
     h('div', {}, h('label', {}, 'Reject qty'), num('reject_qty', v.reject_qty ?? 0)),
     h('div', {}, h('label', {}, 'Run time (min)'), num('run_min', v.run_min)),
@@ -1679,6 +1850,22 @@ async function outputForm(row, preset, onSaved, onCancel) {
     editable ? h('button', { class: 'btn primary', onclick: save }, row ? 'Save' : 'Save output') : null,
   ];
   return { body: [err, form], buttons };
+}
+
+// Hour slots from Working time, e.g. "Day 08:30-09:30". A new entry starts on the current hour.
+function slotSelect(value, pickNow) {
+  const wt = state.worktime || { shifts: [] };
+  const all = wt.shifts.flatMap((sh) => sh.slots.map((x) => `${sh.name} ${x.label}`));
+  if (!value && pickNow) {
+    const d = new Date(), now = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+    value = all.find((x) => { const [a, b] = x.split(' ').pop().split('-'); return a <= b ? now >= a && now < b : now >= a || now < b; }) || '';
+  }
+  return h('select', { name: 'slot', 'aria-label': 'Hour slot' }, h('option', { value: '' }, '—'),
+    value && !all.includes(value) ? h('option', { value, selected: true }, value) : null,
+    wt.shifts.map((sh) => h('optgroup', { label: `${sh.name} shift` }, sh.slots.map((x) => {
+      const v = `${sh.name} ${x.label}`;
+      return h('option', { value: v, selected: v === value }, `${x.label}${x.minutes < 60 ? ` (${x.minutes} min)` : ''}`);
+    }))));
 }
 
 async function outputDialog(row, preset, reload) {
@@ -1876,12 +2063,12 @@ function renderShell() {
   }
   groups.Engineering = [['#/drawings', 'Drawings'], ['#/pm', 'PM check log'], ...(groups.Engineering || [])];
   const daily = [['#/daily', 'Daily board'], ...(groups['Daily work'] || [])];
-  groups.Production = [['#/operator', 'Operator form'], ['#/roster', 'Operator roster'], ['#/layout', 'Shop-floor layout'], ...(groups.Production || [])];
+  groups.Production = [['#/operator', 'Operator form'], ['#/roster', 'Operator roster'], ['#/hourly', 'Hourly output'], ['#/actual', 'Actual output'], ['#/layout', 'Shop-floor layout'], ...(groups.Production || [])];
   groups.Planning = [['#/plan', 'Production schedule'], ...(groups.Planning || [])];
   if (right('projects', 'create')) groups.Planning = [['#/project-new', 'New project (parts)'], ...groups.Planning];
   delete groups['Daily work'];
   const sections = Object.entries({ 'Daily work': daily, ...groups });
-  if (state.user.role === 'admin') sections.push(['Admin', [['#/users', 'Users'], ['#/rights', 'Access rights'], ['#/audit', 'Activity log']]]);
+  if (state.user.role === 'admin') sections.push(['Admin', [['#/users', 'Users'], ['#/rights', 'Access rights'], ['#/worktime', 'Working time'], ['#/audit', 'Activity log']]]);
   sections.push(['Account', [['#/account', 'My account']]]);
   // Menu slicer: chips that show one menu group at a time, plus a quick filter by page name.
   let pick = 'All';
@@ -1941,6 +2128,9 @@ async function route() {
     else if (a === 'drawings') view = await viewDrawings();
     else if (a === 'pm') view = await viewPm();
     else if (a === 'plan') view = await viewPlan();
+    else if (a === 'worktime') view = await viewWorktime();
+    else if (a === 'hourly') view = await viewHourly();
+    else if (a === 'actual') view = await viewActual();
     else if (a === 'roster') view = await viewRoster();
     else if (a === 'nesting') view = await viewNesting(Number(b));
     else if (a === 'daily') view = await viewDaily(b);
@@ -1971,6 +2161,7 @@ async function route() {
 async function start() {
   const [me, meta] = await Promise.all([api('GET', '/api/me'), api('GET', '/api/meta')]);
   Object.assign(state, { user: me.user, rights: me.rights, version: me.version, meta });
+  state.worktime = await api('GET', '/api/worktime').catch(() => null);
   applyTheme(me.user.theme);
   renderShell();
   await route();

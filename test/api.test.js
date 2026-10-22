@@ -638,3 +638,37 @@ test('Planner schedules a project (manual and auto plan); Supervisor plans opera
   assert.ok(dash.schedules.some((x) => x.project_id === proj.id));
   assert.ok(Array.isArray(dash.processes[0].projects));
 });
+
+test('Admin sets working time; hourly output from the operator roster; actual output by process and project with export', async () => {
+  let wt = (await call(admin, 'GET', '/api/worktime')).data;
+  assert.equal(wt.minutes_per_day, 465);
+  assert.ok(wt.shifts[0].slots.length >= 8);
+  assert.equal((await call(admin, 'POST', '/api/shifts', { name: 'Bad', start_time: '25:00', end_time: '05:00', days: 'Mon-Fri' })).status, 400);
+  const night = (await call(admin, 'POST', '/api/shifts', { name: 'Night', start_time: '20:30', end_time: '05:30', break_start: '00:00', break_end: '01:00', days: 'Mon-Fri' })).data;
+  assert.equal(night.net_min, 480);
+  wt = (await call(admin, 'GET', '/api/worktime')).data;
+  assert.equal(wt.minutes_per_day, 945);
+  assert.ok(wt.shifts.find((s) => s.name === 'Night').slots.some((x) => x.label === '23:30-00:30' && x.minutes === 30));
+  await call(admin, 'PUT', `/api/shifts/${night.id}`, { active: 'No' });
+  assert.equal((await call(admin, 'POST', '/api/holidays', { date: '2026-10-27', name: 'Test holiday' })).status, 201);
+  const op = await login('operator1', 'operator123').catch(() => null);
+  if (op) assert.equal((await call(op, 'POST', '/api/holidays', { date: '2026-10-28', name: 'x' })).status, 403);
+
+  const jt = (await call(admin, 'GET', '/api/job_travellers')).data.find((j) => j.project_id);
+  const proc = (await call(admin, 'GET', '/api/shop_processes')).data[0];
+  await call(admin, 'POST', '/api/shift_plans', { date: '2026-10-29', shift: 'Day', operator: 'Siti', process_id: proc.id, job_traveller_id: jt.id, planned_qty: 93 });
+  await call(admin, 'POST', '/api/operator_outputs', { date: '2026-10-29', process_id: proc.id, job_traveller_id: jt.id, slot: 'Day 08:30-09:30', good_qty: 11, reject_qty: 1 });
+  const hr = (await call(admin, 'GET', '/api/reports/hourly?date=2026-10-29')).data;
+  const row = hr.rows.find((x) => x.operator === 'Siti');
+  assert.equal(row.slots[0].label, '08:30-09:30');
+  assert.equal(row.slots[0].actual, 11);
+  assert.equal(row.slots.reduce((n, x) => n + x.plan, 0) >= 92, true);
+  assert.equal(row.actual, 11);
+
+  const act = (await call(admin, 'GET', `/api/reports/actual?from=2026-10-29&to=2026-10-29&project_id=${jt.project_id}`)).data;
+  assert.ok(act.summary.some((x) => x.process === proc.name && x.good >= 11));
+  const x = await call(admin, 'GET', '/api/reports/actual.xlsx?from=2026-10-01&to=2026-10-31');
+  assert.equal(x.status, 200);
+  assert.match(x.headers.get('content-type'), /spreadsheetml/);
+  assert.equal((await call(admin, 'GET', '/api/reports/hourly.csv?date=2026-10-29')).status, 200);
+});

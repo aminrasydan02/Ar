@@ -1,9 +1,8 @@
 'use strict';
-// Net working minutes per day, as in the NEWAYS schedule reports:
-// 08:30-17:30 less the 12:15-13:30 break.
-const MINUTES_PER_DAY = 465;
+// Net working minutes per day come from Working time (Admin); 465 = 08:30-17:30 less the 12:15-13:30 break.
 
 function buildDashboard(db) {
+  const MINUTES_PER_DAY = require('./worktime').minutesPerDay(db);
   const one = (sql, ...p) => db.prepare(sql).get(...p);
   const all = (sql, ...p) => db.prepare(sql).all(...p);
 
@@ -156,4 +155,4 @@ function buildDashboard(db) {
   return { kpi, production, processes, issues, projects, workflow, load, downtime, lowStock, plates, projectProgress, schedules, lowItems, recentNcrs, minutesPerDay: MINUTES_PER_DAY };
 }
 
-module.exports = { buildDashboard, MINUTES_PER_DAY };
+module.exports = { buildDashboard };

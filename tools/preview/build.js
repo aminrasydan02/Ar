@@ -31,7 +31,11 @@ async function main() {
   try {
     const meta = await get('/api/meta');
     for (const name of Object.keys(meta.resources)) await get(`/api/${name}`);
-    for (const url of ['/api/me', '/api/dashboard', '/api/users', '/api/audit', '/api/rights', '/api/layout']) await get(url);
+    for (const url of ['/api/me', '/api/dashboard', '/api/users', '/api/audit', '/api/rights', '/api/layout', '/api/worktime']) await get(url);
+    // Hourly and actual output as the pages ask for them on the day the preview is built.
+    const day = new Date().toISOString().slice(0, 10);
+    await get(`/api/reports/hourly?date=${day}`);
+    await get(`/api/reports/actual?from=${day.slice(0, 8)}01&to=${day}`);
     for (const v of await get('/api/layout/versions')) await get(`/api/layout/versions/${v.version}`);
     for (const jt of snap['/api/job_travellers']) { await get(`/api/job_travellers/${jt.id}/info`); await get(`/api/job_travellers/${jt.id}/progress`); }
     for (const i of snap['/api/issues']) await get(`/api/issues/${i.id}/replies`);

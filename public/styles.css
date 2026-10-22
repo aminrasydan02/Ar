@@ -611,3 +611,26 @@ table.roster tbody th { white-space: nowrap; }
   .g-head .g-lab { display: none; }
   .plan-tools { grid-template-columns: 1fr; }
 }
+
+/* Section tabs: one kind of information per table */
+.sec-tabs { display: flex; gap: 4px; flex-wrap: wrap; margin: 4px 0 8px; padding: 4px; border-radius: 12px; background: var(--soft); border: 1px solid var(--line); width: fit-content; max-width: 100%; }
+.sec-tab { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border: 0; border-radius: 9px; background: transparent; color: var(--ink); font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; }
+.sec-tab:hover { background: var(--hover); }
+.sec-tab:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; }
+.sec-tab .n { font-size: 11px; padding: 0 6px; border-radius: 999px; background: var(--panel); color: var(--muted); }
+.sec-tab.on { background: var(--primary); color: var(--on-primary); }
+.sec-tab.on .n { background: var(--on-primary); color: var(--primary); }
+td.long { white-space: pre-wrap; min-width: 220px; max-width: 420px; }
+.chip.static { cursor: default; }
+.chip.static:hover { background: transparent; }
+
+/* Hourly output grid */
+table.hourly th, table.hourly td { white-space: nowrap; }
+table.hourly thead th.num { font-size: 11px; }
+.hr-c { text-align: center; font-variant-numeric: tabular-nums; min-width: 64px; }
+.hr-c strong { font-size: 14px; }
+.hr-c small { color: var(--muted); font-size: 11px; margin-left: 2px; }
+.hr-c.ok { background: var(--ok-bg); } .hr-c.ok strong { color: var(--ok); }
+.hr-c.warn { background: var(--warn-bg); } .hr-c.warn strong { color: var(--warn); }
+.hr-c.bad { background: var(--bad-bg); } .hr-c.bad strong { color: var(--bad); }
+.hr-c.ok small, .hr-c.warn small, .hr-c.bad small { color: var(--ink); }
