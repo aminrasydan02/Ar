@@ -3,7 +3,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { resources, PROCESSES, MOVE_SIGN } = require('./resources');
-const { ROLES, can, rightsFor, canApprove } = require('./perm');
+const { ROLES, can, rightsFor, canApprove, canEditLayout } = require('./perm');
+const { checkLayout, starterLayout } = require('./layout');
 const auth = require('./auth');
 const { FORMATS, MODEL_FORMATS, MIME, parseDrawingName, safeFilename, checkContent } = require('./drawings');
 const { buildDashboard } = require('./dashboard');
@@ -439,6 +440,50 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
     };
   }
 
+  // ---- shop-floor layout ---------------------------------------------------
+  // Live data for the layout: machine status, open work orders, last Job Traveller run, stock per location.
+  function layoutLive() {
+    const machines = db.prepare(`SELECT m.id, m.code, m.name, m.machine_type, m.status,
+        (SELECT COUNT(*) FROM maint_orders w WHERE w.machine_id = m.id AND w.status != 'Closed') AS open_wo
+      FROM machines m ORDER BY m.code`).all();
+    const lastRun = db.prepare(`SELECT o.date, j.id AS jt_id, j.jt_no, j.part_no FROM operator_outputs o JOIN job_travellers j ON j.id = o.job_traveller_id
+      WHERE o.machine IN (?, ?) ORDER BY o.date DESC, o.id DESC LIMIT 1`);
+    for (const m of machines) m.last = lastRun.get(m.code, m.name) || null;
+    const locations = db.prepare(`SELECT location, COUNT(*) AS items, SUM(status IN ('Low','Out')) AS low
+      FROM inventory_items WHERE COALESCE(location, '') != '' GROUP BY location ORDER BY location`).all();
+    return { machines, locations };
+  }
+
+  function handleLayout(req, res, method, parts, user) {
+    allow(user, 'read', 'machines');
+    const get = (v) => (v ? db.prepare('SELECT * FROM floor_layouts WHERE version = ?').get(v) : db.prepare('SELECT * FROM floor_layouts ORDER BY version DESC LIMIT 1').get());
+    const shape = (row, live) => (row ? { version: row.version, note: row.note, saved_by: row.saved_by, created_at: row.created_at, ...JSON.parse(row.data), ...live }
+      : { version: null, ...starterLayout(live.machines, live.locations.map((l) => l.location)), ...live });
+    if (method === 'GET' && parts[1] === 'versions' && parts[2]) {
+      const row = get(Number(parts[2]));
+      if (!row) throw new HttpError(404, 'Version not found');
+      return send(res, 200, shape(row, layoutLive()));
+    }
+    if (method === 'GET' && parts[1] === 'versions') {
+      return send(res, 200, db.prepare('SELECT version, note, saved_by, created_at FROM floor_layouts ORDER BY version DESC LIMIT 200').all());
+    }
+    if (method === 'GET' && !parts[1]) return send(res, 200, shape(get(), layoutLive()));
+    if (method === 'POST' && !parts[1]) {
+      if (!canEditLayout(user)) throw new HttpError(403, 'Only Admin, Planner, Supervisor, Technician or Manager can change the layout');
+      return readJson(req).then((b) => {
+        let layout;
+        try { layout = checkLayout(b, noCode); } catch (err) { throw err instanceof HttpError ? err : new HttpError(400, err.message); }
+        const note = String(b.note || '').trim().slice(0, 200);
+        noCode('Note', note);
+        const version = (db.prepare('SELECT MAX(version) AS v FROM floor_layouts').get().v || 0) + 1;
+        db.prepare('INSERT INTO floor_layouts (version, data, note, saved_by) VALUES (?, ?, ?, ?)').run(version, JSON.stringify(layout), note || null, user.username);
+        audit(user, 'save', 'layout', version);
+        return send(res, 201, shape(get(version), layoutLive()));
+      });
+    }
+    throw new HttpError(405, 'Method not allowed');
+  }
+
   // New project with a mother part and its child parts (any depth) in one go.
   // parts: [{ key, parent_key, part_no, description, material, thickness, qty_per_parent, process_ids }]
   function createProjectTree(b, user) {
@@ -740,6 +785,7 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
       audit(user, 'approve', 'job_travellers', id);
       return send(res, 200, getRecord('job_travellers', id));
     }
+    if (parts[0] === 'layout') return handleLayout(req, res, method, parts, user);
     if (parts[0] === 'projects' && parts[1] === 'tree' && method === 'POST') {
       return send(res, 201, createProjectTree(await readJson(req), user));
     }

@@ -508,3 +508,27 @@ test('inventory: stock moves update qty on hand, low stock shows, no negative st
   const log = (await call(admin, 'GET', `/api/inventory_moves?item_id=${glove.id}`)).data;
   assert.deepEqual(log.map((m) => m.move), ['Adjust', 'Issue / use', 'Receive']);
 });
+
+test('shop-floor layout: starter layout, saved versions, live machine data, no code', async () => {
+  const op = await login('op1', 'password123');
+  let r = await call(op, 'GET', '/api/layout');
+  assert.equal(r.status, 200);
+  assert.equal(r.data.version, null);
+  assert.ok(r.data.items.some((i) => i.type === 'machine'));
+  const layout = { floor: r.data.floor, items: r.data.items };
+  assert.equal((await call(op, 'POST', '/api/layout', layout)).status, 403);
+  r = await call(planner, 'POST', '/api/layout', { ...layout, note: 'First layout' });
+  assert.equal(r.status, 201);
+  assert.equal(r.data.version, 1);
+  layout.items[0].x += 3;
+  r = await call(admin, 'POST', '/api/layout', { ...layout, note: 'Moved laser' });
+  assert.equal(r.data.version, 2);
+  assert.equal(r.data.items[0].x, layout.items[0].x);
+  assert.ok(r.data.machines[0].code);
+  assert.equal((await call(admin, 'GET', '/api/layout/versions')).data.length, 2);
+  assert.equal((await call(admin, 'GET', '/api/layout/versions/1')).data.items[0].x, layout.items[0].x - 3);
+  r = await call(admin, 'POST', '/api/layout', { floor: layout.floor, items: [{ type: 'label', label: '<img src=x onerror=alert(1)>', x: 1, y: 1, w: 2, h: 1 }] });
+  assert.equal(r.status, 400);
+  r = await call(admin, 'POST', '/api/layout', { floor: layout.floor, items: [{ type: 'script', x: 1, y: 1, w: 2, h: 1 }] });
+  assert.equal(r.status, 400);
+});

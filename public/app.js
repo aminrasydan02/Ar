@@ -788,6 +788,128 @@ async function viewProjectNew() {
     msg];
 }
 
+// Shop-floor layout. Boxes on a 0.5 m grid; drag to move, drag the corner to resize.
+const nodes = (...a) => a.flat(Infinity).filter((x) => x !== null && x !== undefined && x !== false);
+const LAYOUT_TYPES = { machine: 'Machine', cell: 'Work cell', storage: 'Storage / rack', walkway: 'Walkway', office: 'Office / QC', wall: 'Wall', label: 'Label' };
+async function viewLayout(versionArg) {
+  let data = await api('GET', versionArg ? `/api/layout/versions/${versionArg}` : '/api/layout');
+  const versions = await api('GET', '/api/layout/versions');
+  const canEdit = right('layout', 'edit');
+  let items = data.items.map((it) => ({ ...it }));
+  let floor = { ...data.floor };
+  let selected = null;
+  let dirty = false;
+  const PX = 16; // pixels per grid unit
+  const mById = new Map(data.machines.map((m) => [m.id, m]));
+  const locs = new Map(data.locations.map((l) => [l.location, l]));
+  const canvas = h('div', { class: 'floor' });
+  const side = h('div', { class: 'floor-side panel' });
+  const status = h('span', { class: 'muted' });
+
+  const place = (el, it) => { el.style.left = `${it.x * PX}px`; el.style.top = `${it.y * PX}px`; el.style.width = `${it.w * PX}px`; el.style.height = `${it.h * PX}px`; };
+  function draw() {
+    canvas.style.width = `${floor.w * PX}px`; canvas.style.height = `${floor.h * PX}px`;
+    const rank = ['walkway', 'cell', 'office', 'storage', 'wall', 'machine', 'label'];
+    canvas.replaceChildren(...[...items].sort((a, b) => rank.indexOf(a.type) - rank.indexOf(b.type)).map((it) => {
+      const m = it.machine_id && mById.get(it.machine_id);
+      const loc = it.location && locs.get(it.location);
+      const cls = ['lay', `lay-${it.type}`, it === selected ? 'sel' : '',
+        m ? `st-${STATUS_CLASS[m.status] || 'info'}` : '', loc && loc.low ? 'st-warn' : ''].join(' ');
+      const el = h('div', { class: cls, title: it.label },
+        h('div', { class: 'lay-name' }, it.label || (m ? m.code : LAYOUT_TYPES[it.type])),
+        m ? h('div', { class: 'lay-sub' }, m.status, m.open_wo ? ` · ${m.open_wo} WO` : '') : null,
+        loc ? h('div', { class: 'lay-sub' }, `${loc.items} item${loc.items === 1 ? '' : 's'}${loc.low ? ` · ${loc.low} low` : ''}`) : null,
+        canEdit ? h('div', { class: 'lay-grip' }) : null);
+      place(el, it);
+      el.addEventListener('pointerdown', (e) => startDrag(e, it, el, e.target.classList.contains('lay-grip')));
+      return el;
+    }));
+    drawSide();
+  }
+  function startDrag(e, it, el, resize) {
+    e.preventDefault();
+    selected = it;
+    if (!canEdit) { draw(); return; }
+    const start = { ...it, cx: e.clientX, cy: e.clientY };
+    el.setPointerCapture(e.pointerId);
+    const move = (ev) => {
+      const dx = Math.round((ev.clientX - start.cx) / PX), dy = Math.round((ev.clientY - start.cy) / PX);
+      if (resize) { it.w = Math.max(1, Math.min(floor.w - it.x, start.w + dx)); it.h = Math.max(1, Math.min(floor.h - it.y, start.h + dy)); }
+      else { it.x = Math.max(0, Math.min(floor.w - it.w, start.x + dx)); it.y = Math.max(0, Math.min(floor.h - it.h, start.y + dy)); }
+      place(el, it);
+    };
+    el.addEventListener('pointermove', move);
+    el.addEventListener('pointerup', () => {
+      el.removeEventListener('pointermove', move);
+      if (it.x !== start.x || it.y !== start.y || it.w !== start.w || it.h !== start.h) dirty = true;
+      draw();
+    }, { once: true });
+  }
+  function drawSide() {
+    if (!selected) {
+      side.replaceChildren(...nodes(h('strong', {}, 'Floor'), h('p', { class: 'muted' }, `${floor.w / 2} m × ${floor.h / 2} m. 1 square = 0.5 m.`),
+        canEdit ? [h('label', {}, 'Width (squares)'), numInput(floor, 'w', 10, 400), h('label', {}, 'Length (squares)'), numInput(floor, 'h', 10, 400)] : null,
+        h('p', { class: 'muted' }, canEdit ? 'Click an item to change it. Drag to move, drag the corner to resize.' : 'Click a machine or store to see its details.')));
+      return;
+    }
+    const it = selected;
+    const m = it.machine_id && mById.get(it.machine_id);
+    const loc = it.location && locs.get(it.location);
+    const set = (k) => (e) => { it[k] = e.target.value; dirty = true; draw(); };
+    side.replaceChildren(...nodes(
+      h('strong', {}, LAYOUT_TYPES[it.type]),
+      canEdit ? [
+        h('label', {}, 'Name'), h('input', { value: it.label, maxlength: 60, onchange: set('label') }),
+        it.type === 'machine' ? [h('label', {}, 'Machine'), h('select', { onchange: (e) => { it.machine_id = Number(e.target.value) || null; dirty = true; draw(); } },
+          h('option', { value: '' }, '—'), data.machines.map((x) => h('option', { value: x.id, selected: x.id === it.machine_id }, `${x.code} ${x.name}`)))] : null,
+        it.type === 'storage' ? [h('label', {}, 'Inventory location'), h('select', { onchange: set('location') },
+          h('option', { value: '' }, '—'), data.locations.map((l) => h('option', { selected: l.location === it.location }, l.location)))] : null,
+        h('div', { class: 'gap-top' }, h('button', { class: 'btn small danger', onclick: () => { items = items.filter((x) => x !== it); selected = null; dirty = true; draw(); } }, 'Remove'), ' ',
+          h('button', { class: 'btn small', onclick: () => { selected = null; draw(); } }, 'Done')),
+      ] : null,
+      m ? h('div', { class: 'gap-top' }, pill(m.status), h('div', {}, `${m.code} — ${m.name}`), h('div', { class: 'muted' }, m.machine_type || ''),
+        h('div', {}, `Open work orders: ${m.open_wo}`),
+        m.last ? h('div', {}, 'Last job: ', h('a', { href: `#/jt/${m.last.jt_id}` }, m.last.jt_no), ` ${m.last.part_no} (${fmtDate(m.last.date)})`) : h('div', { class: 'muted' }, 'No output recorded on this machine yet'),
+        h('a', { class: 'btn small gap-top', href: '#/r/maint_orders' }, 'Maintenance')) : null,
+      loc ? h('div', { class: 'gap-top' }, h('div', {}, `${loc.items} items stored here`), loc.low ? h('div', {}, pill('Low'), ` ${loc.low} to reorder`) : null,
+        h('a', { class: 'btn small gap-top', href: '#/r/inventory_items' }, 'Inventory')) : null));
+  }
+  function numInput(obj, key, min, max) {
+    return h('input', { type: 'number', min, max, value: obj[key], onchange: (e) => {
+      const v = Math.trunc(Number(e.target.value));
+      if (v >= min && v <= max && items.every((it) => (key === 'w' ? it.x + it.w : it.y + it.h) <= v)) { obj[key] = v; dirty = true; }
+      else toast('The floor must stay bigger than the items on it', true);
+      draw();
+    } });
+  }
+  function add(type) {
+    const it = { id: `n${Date.now()}`, type, label: LAYOUT_TYPES[type], x: 1, y: 1, w: type === 'walkway' ? 20 : type === 'wall' ? 20 : type === 'label' ? 6 : 6, h: type === 'walkway' ? 3 : type === 'wall' || type === 'label' ? 1 : 5, machine_id: null, location: '' };
+    items.push(it); selected = it; dirty = true; draw();
+  }
+  const note = h('input', { class: 'note', placeholder: 'What changed (optional)', maxlength: 200 });
+  async function save() {
+    try {
+      data = await api('POST', '/api/layout', { floor, items, note: note.value });
+      dirty = false; toast(`Layout saved as version ${data.version}`); location.hash = '#/layout';
+      route();
+    } catch (e) { toast(e.message, true); }
+  }
+  const pick = h('select', { onchange: (e) => { location.hash = e.target.value ? `#/layout/${e.target.value}` : '#/layout'; } },
+    h('option', { value: '' }, 'Latest version'),
+    versions.map((v) => h('option', { value: v.version, selected: String(v.version) === String(versionArg) }, `v${v.version} · ${fmtDate(v.created_at)} · ${v.saved_by}${v.note ? ` · ${v.note}` : ''}`)));
+  window.onbeforeunload = () => (dirty ? true : undefined);
+  draw();
+  return [
+    h('div', { class: 'toolbar' }, h('h1', { class: 'grow' }, 'Shop-floor layout'), pick),
+    h('p', { class: 'muted' }, data.version ? `Version ${data.version}, saved by ${data.saved_by} on ${fmtDate(data.created_at)}${versionArg ? ' (older version)' : ''}.` : 'Not saved yet: this is a starting layout from the machine list and inventory locations.'),
+    canEdit ? h('div', { class: 'toolbar' }, Object.entries(LAYOUT_TYPES).map(([k, v]) => h('button', { class: 'btn small', onclick: () => add(k) }, `+ ${v}`)),
+      h('span', { class: 'grow' }), note, h('button', { class: 'btn primary', onclick: save }, versionArg ? 'Restore as latest' : 'Save layout'), status) : null,
+    h('div', { class: 'floor-wrap' }, h('div', { class: 'floor-scroll' }, canvas), side),
+    h('div', { class: 'legend muted' }, h('span', { class: 'lay-key st-ok' }, 'Running'), h('span', { class: 'lay-key st-info' }, 'Idle'),
+      h('span', { class: 'lay-key st-warn' }, 'Maintenance / low stock'), h('span', { class: 'lay-key st-bad' }, 'Down')),
+  ];
+}
+
 // A4 Job Traveller that goes with the parts through the shop.
 async function viewJobTravellerPrint(id) {
   const [jt, steps] = await Promise.all([api('GET', `/api/job_travellers/${id}`), api('GET', `/api/job_travellers/${id}/progress`)]);
@@ -1054,7 +1176,7 @@ function renderShell() {
   }
   groups.Engineering = [['#/drawings', 'Drawings'], ...(groups.Engineering || [])];
   const daily = [['#/daily', 'Daily board'], ...(groups['Daily work'] || [])];
-  groups.Production = [['#/operator', 'Operator form'], ...(groups.Production || [])];
+  groups.Production = [['#/operator', 'Operator form'], ['#/layout', 'Shop-floor layout'], ...(groups.Production || [])];
   if (right('projects', 'create')) groups.Planning = [['#/project-new', 'New project (parts)'], ...(groups.Planning || [])];
   delete groups['Daily work'];
   const nav = h('nav', { class: 'side', id: 'side' },
@@ -1085,6 +1207,7 @@ async function route() {
   document.querySelectorAll('.side a').forEach((el) => el.classList.toggle('on', el.getAttribute('href') === `#/${a ? [a, b].filter(Boolean).join('/') : ''}`));
   document.getElementById('side').classList.remove('open');
   document.querySelectorAll('.overlay').forEach((o) => o.remove());
+  if (a !== 'layout') window.onbeforeunload = null;
   let view;
   try {
     if (!a) view = await viewDashboard();
@@ -1096,6 +1219,7 @@ async function route() {
     else if (a === 'jt') view = await viewJobTraveller(Number(b));
     else if (a === 'operator') view = await viewOperator();
     else if (a === 'find') view = await viewFind();
+    else if (a === 'layout') view = await viewLayout(b);
     else if (a === 'project-new') view = await viewProjectNew();
     else if (a === 'project') view = await viewProject(Number(b));
     else if (a === 'ncr' && c === 'print') view = await viewNcrPrint(Number(b));

@@ -75,6 +75,14 @@ function migrate(db) {
       username TEXT, process TEXT, message TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS ix_issue_replies_issue ON issue_replies(issue_id);
+    -- Shop-floor layout: every save is a new version, so older layouts can be viewed or restored.
+    CREATE TABLE IF NOT EXISTS floor_layouts (
+      id INTEGER PRIMARY KEY,
+      version INTEGER NOT NULL UNIQUE,
+      data TEXT NOT NULL,
+      note TEXT, saved_by TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
   // The four NEWAYS shop processes, added once. Admin can add more later.
   if (!db.prepare("SELECT 1 FROM meta WHERE key = 'shop_processes_seeded'").get()) {

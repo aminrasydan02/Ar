@@ -51,6 +51,7 @@ function rightsFor(who) {
     }
   }
   out.users = { manage: role === 'admin' };
+  out.layout = { edit: canEditLayout(typeof who === 'string' ? { role } : who) };
   out.job_travellers.approve = canApprove(typeof who === 'string' ? { role } : who);
   return out;
 }
@@ -58,4 +59,9 @@ function rightsFor(who) {
 // Approving a Job Traveller: Manager (any role but viewer) or Admin.
 const canApprove = (u) => !!u && (u.role === 'admin' || (u.process === 'Manager' && u.role !== 'viewer'));
 
-module.exports = { ROLES, can, rightsFor, canApprove };
+// Editing the shop-floor layout: Admin, or Planner / Supervisor / Technician / Manager.
+const LAYOUT_PROCESSES = ['Planner', 'Supervisor', 'Technician', 'Manager'];
+const canEditLayout = (u) => !!u && (u.role === 'admin' ||
+  (u.role === 'planner' && (!u.process || LAYOUT_PROCESSES.includes(u.process))));
+
+module.exports = { ROLES, can, rightsFor, canApprove, canEditLayout };
