@@ -66,6 +66,7 @@ function userPreset(resName) {
   const p = state.user.process || '';
   if (resName === 'daily_logs') return { date: localToday(), process: p };
   if (resName === 'issues') return { opened: localToday(), from_process: p };
+  if (resName === 'operator_outputs') return { date: localToday() };
   return {};
 }
 
@@ -178,7 +179,7 @@ async function editRecord(resName, row, preset, onSaved) {
 
 // A searchable table for one module. `filter` limits rows (e.g. { project_id: 3 }),
 // `extra` adds buttons to the toolbar, `rowActions` adds buttons to each row.
-function recordTable(resName, { filter = {}, extra = [], rowActions, columns } = {}) {
+function recordTable(resName, { filter = {}, extra = [], rowActions, columns, onRow } = {}) {
   const res = state.meta.resources[resName];
   const fields = res.fields.filter((f) => f.list !== false && (!columns || columns.includes(f.name)));
   const wrap = h('div');
@@ -194,7 +195,7 @@ function recordTable(resName, { filter = {}, extra = [], rowActions, columns } =
       if (!rows.length) { tableBox.replaceChildren(h('div', { class: 'empty' }, 'No records yet.')); return; }
       tableBox.replaceChildren(h('table', {},
         h('thead', {}, h('tr', {}, fields.map((f) => h('th', {}, f.label)), rowActions ? h('th', {}, '') : null)),
-        h('tbody', {}, rows.map((r) => h('tr', { class: 'click', onclick: () => editRecord(resName, r, null, load) },
+        h('tbody', {}, rows.map((r) => h('tr', { class: 'click', onclick: () => (onRow ? onRow(r, load) : editRecord(resName, r, null, load)) },
           fields.map((f) => h('td', { class: f.type === 'number' ? 'num' : '' }, cellValue(f, r))),
           rowActions ? h('td', { onclick: (e) => e.stopPropagation() }, rowActions(r, load)) : null)))));
     } catch (e) { tableBox.replaceChildren(h('div', { class: 'msg err' }, e.message)); }
@@ -206,7 +207,7 @@ function recordTable(resName, { filter = {}, extra = [], rowActions, columns } =
     search, count, h('span', { class: 'grow' }),
     extra,
     right(resName, 'export') ? h('a', { class: 'btn', href: `/api/${resName}/export.csv?${new URLSearchParams(filter)}` }, 'Export CSV') : null,
-    right(resName, 'create') ? h('button', { class: 'btn primary', onclick: () => editRecord(resName, null, filter, load) }, `+ New ${res.singular}`) : null),
+    right(resName, 'create') ? h('button', { class: 'btn primary', onclick: () => (onRow ? onRow(null, load) : editRecord(resName, null, filter, load)) }, `+ New ${res.singular}`) : null),
     tableBox);
   load();
   wrap.reload = load;
@@ -273,6 +274,11 @@ function viewList(resName) {
   if (resName === 'projects') opts.rowActions = (r) => h('a', { class: 'btn small', href: `#/project/${r.id}` }, 'Open');
   if (resName === 'ncrs') opts.rowActions = (r) => h('a', { class: 'btn small', href: `#/ncr/${r.id}/print` }, 'Print');
   if (resName === 'issues') opts.rowActions = (r) => h('a', { class: 'btn small', href: `#/issue/${r.id}` }, 'Discuss');
+  if (resName === 'job_travellers') {
+    opts.rowActions = (r) => h('a', { class: 'btn small', href: `#/jt/${r.id}` }, 'Open');
+    if (right('job_travellers', 'create')) opts.extra = [h('button', { class: 'btn', onclick: () => importDialog(() => route()) }, 'Import Excel')];
+  }
+  if (resName === 'operator_outputs') opts.onRow = (r, reload) => outputDialog(r, {}, reload);
   return [h('h1', {}, res.label), recordTable(resName, opts)];
 }
 
@@ -538,6 +544,158 @@ async function viewIssue(id) {
   ];
 }
 
+// ---------- job traveller and operator output --------------------------------
+
+function importDialog(onDone, projectId) {
+  const err = h('div');
+  const preview = h('div');
+  const input = h('input', { type: 'file', accept: '.xlsx,.csv' });
+  let file = null;
+  const qs = (commit) => new URLSearchParams({ filename: file.name, ...(projectId ? { project_id: projectId } : {}), ...(commit ? { commit: 1 } : {}) });
+  input.addEventListener('change', async () => {
+    file = input.files[0];
+    err.replaceChildren(); preview.replaceChildren();
+    if (!file) return;
+    try {
+      const r = await api('POST', `/api/job_travellers/import?${qs(false)}`, undefined, file);
+      preview.replaceChildren(h('p', { class: 'muted' }, `Sheet "${r.sheet}": ${r.lines.length} line(s).`),
+        h('div', { class: 'table-wrap' }, h('table', {},
+          h('thead', {}, h('tr', {}, ['Part number', 'Process', 'Stage', 'Qty', 'Cycle (min)', 'Done', 'Job Traveller'].map((t) => h('th', {}, t)))),
+          h('tbody', {}, r.lines.map((l) => h('tr', {}, h('td', {}, l.part_no), h('td', {}, l.process || h('span', { class: 'pill bad' }, 'unknown')),
+            h('td', { class: 'num' }, l.seq ?? ''), h('td', { class: 'num' }, l.qty), h('td', { class: 'num' }, l.cycle_min ?? ''),
+            h('td', { class: 'num' }, l.good || ''), h('td', {}, l.jt_no ? `${l.jt_no} (update)` : 'New')))))));
+    } catch (e) { err.replaceChildren(h('div', { class: 'msg err' }, e.message)); }
+  });
+  openModal('Import Job Travellers from Excel', [err,
+    h('p', { class: 'muted' }, 'Choose a schedule report (.xlsx) or a .csv with Part Number and quantity columns. The process is read from the report title or from a Machine_Cell / Process column.'),
+    input, preview], (close) => [
+    h('button', { class: 'btn', onclick: close }, 'Cancel'),
+    h('button', { class: 'btn primary', onclick: async () => {
+      if (!file) return;
+      try { const r = await api('POST', `/api/job_travellers/import?${qs(true)}`, undefined, file); close(); toast(`${r.lines.length} line(s) imported`); onDone(); }
+      catch (e) { err.replaceChildren(h('div', { class: 'msg err' }, e.message)); }
+    } }, 'Import'),
+  ]);
+}
+
+async function viewJobTraveller(id) {
+  const [jt, steps] = await Promise.all([api('GET', `/api/job_travellers/${id}`), api('GET', `/api/job_travellers/${id}/progress`)]);
+  const reload = () => route();
+  return [
+    h('div', { class: 'toolbar' }, h('h1', { class: 'grow' }, `${jt.jt_no} — ${jt.part_no}`),
+      h('a', { class: 'btn', href: `#/operator?jt=${jt.id}` }, 'Record output'),
+      h('button', { class: 'btn', onclick: () => editRecord('job_travellers', jt, null, reload) }, right('job_travellers', 'update') ? 'Edit' : 'Details')),
+    h('div', { class: 'panel' }, h('div', { class: 'kpis' },
+      [['Project', jt.project_id__label], ['Customer', jt.customer], ['Drawing', jt.drawing_no], ['Material', [jt.material, jt.thickness && `${jt.thickness} mm`].filter(Boolean).join(' ')],
+        ['Qty', jt.qty], ['Due', jt.due_date]].map(([l, v]) => h('div', {}, h('div', { class: 'muted' }, l), h('div', {}, v || '—'))),
+      h('div', {}, h('div', { class: 'muted' }, 'Status'), pill(jt.status)))),
+    h('h2', {}, 'Routing and progress'),
+    steps.length ? h('div', { class: 'table-wrap' }, h('table', {},
+      h('thead', {}, h('tr', {}, ['Seq', 'Process', 'Cycle (min)', 'Target', 'Good', 'Reject', 'Balance', 'Progress'].map((t) => h('th', {}, t)))),
+      h('tbody', {}, steps.map((s) => {
+        const pct = s.target_qty ? Math.min(100, Math.round((s.good / s.target_qty) * 100)) : 0;
+        const bar = h('div'); bar.style.width = `${pct}%`;
+        return h('tr', {}, h('td', { class: 'num' }, s.seq ?? ''), h('td', {}, s.process), h('td', { class: 'num' }, s.cycle_min ?? ''),
+          h('td', { class: 'num' }, s.target_qty ?? ''), h('td', { class: 'num' }, s.good), h('td', { class: 'num' }, s.reject),
+          h('td', { class: 'num' }, s.target_qty != null ? Math.max(0, s.target_qty - s.good) : ''),
+          h('td', {}, h('div', { class: 'bar' }, bar), ` ${pct}%`));
+      })))) : h('div', { class: 'panel muted' }, 'No process steps yet.'),
+    h('h2', {}, 'Steps'),
+    recordTable('jt_steps', { filter: { job_traveller_id: jt.id }, columns: ['seq', 'process_id', 'cycle_min', 'target_qty', 'details'] }),
+  ];
+}
+
+async function processList() {
+  const all = await api('GET', '/api/shop_processes');
+  return all.filter((p) => p.active !== 'No').sort((a, b) => (a.seq ?? 999) - (b.seq ?? 999));
+}
+const extraNames = (p) => String((p && p.extra_fields) || '').split(',').map((x) => x.trim()).filter(Boolean);
+
+// The one Operator form used by every shop process. `holder` gets the form; returns it.
+async function outputForm(row, preset, onSaved, onCancel) {
+  const [processes, jts] = await Promise.all([processList(), api('GET', '/api/job_travellers')]);
+  const v = { ...userPreset('operator_outputs'), ...(preset || {}), ...(row || {}) };
+  const extra = (() => { try { return JSON.parse(v.extra || '{}'); } catch { return {}; } })();
+  const editable = row ? right('operator_outputs', 'update') && (state.user.role === 'admin' || row.operator === state.user.username) : right('operator_outputs', 'create');
+  const err = h('div');
+  const sel = (name, opts, value) => h('select', { name, required: true, disabled: !editable }, h('option', { value: '' }, ''),
+    opts.map((o) => h('option', { value: o.id, selected: String(o.id) === String(value ?? '') }, o.label)));
+  const num = (name, value) => h('input', { type: 'number', step: 'any', name, value: value ?? '', disabled: !editable });
+  const txt = (name, value, type = 'text') => h('input', { type, name, value: value ?? '', disabled: !editable });
+  const procSel = sel('process_id', processes.map((p) => ({ id: p.id, label: p.name })), v.process_id);
+  const jtSel = h('select', { name: 'job_traveller_id', disabled: !editable });
+  const extraBox = h('div', { class: 'form full' });
+  const targetNote = h('div', { class: 'help' });
+
+  async function refresh() {
+    const pid = Number(procSel.value);
+    const steps = pid ? await api('GET', `/api/jt_steps?process_id=${pid}`) : [];
+    const withStep = new Set(steps.map((s) => s.job_traveller_id));
+    const open = jts.filter((j) => (!pid || withStep.has(j.id) || j.id === Number(v.job_traveller_id)) && !['Completed', 'Cancelled'].includes(j.status));
+    jtSel.replaceChildren(h('option', { value: '' }, ''), ...open.map((j) => h('option', { value: j.id, selected: j.id === Number(v.job_traveller_id) }, `${j.jt_no} · ${j.part_no}`)));
+    const proc = processes.find((p) => p.id === pid);
+    extraBox.replaceChildren(...extraNames(proc).map((n) => h('div', {}, h('label', {}, n), h('input', { type: 'text', 'data-extra': n, value: extra[n] ?? '', disabled: !editable }))));
+    showTarget(steps);
+  }
+  function showTarget(steps) {
+    const s = (steps || []).find((x) => x.job_traveller_id === Number(jtSel.value));
+    targetNote.textContent = s ? `Target ${s.target_qty ?? '—'} pcs, cycle ${s.cycle_min ?? '—'} min` : '';
+  }
+  procSel.addEventListener('change', () => { v.job_traveller_id = jtSel.value; refresh(); });
+  jtSel.addEventListener('change', async () => showTarget(await api('GET', `/api/jt_steps?process_id=${procSel.value}`)));
+
+  const form = h('form', { class: 'form' },
+    h('div', {}, h('label', {}, 'Process *'), procSel),
+    h('div', {}, h('label', {}, 'Job Traveller *'), jtSel, targetNote),
+    h('div', {}, h('label', {}, 'Date *'), txt('date', v.date, 'date')),
+    h('div', {}, h('label', {}, 'Session / time slot'), txt('slot', v.slot)),
+    h('div', {}, h('label', {}, 'Good qty *'), num('good_qty', v.good_qty)),
+    h('div', {}, h('label', {}, 'Reject qty'), num('reject_qty', v.reject_qty ?? 0)),
+    h('div', {}, h('label', {}, 'Run time (min)'), num('run_min', v.run_min)),
+    h('div', {}, h('label', {}, 'Downtime (min)'), num('downtime_min', v.downtime_min ?? 0)),
+    h('div', {}, h('label', {}, 'Machine'), txt('machine', v.machine)),
+    h('div', {}, h('label', {}, 'Remark'), txt('remark', v.remark)),
+    extraBox,
+    row ? h('div', { class: 'full muted small' }, `Recorded by ${row.operator || '—'}`) : null);
+  form.addEventListener('submit', (e) => e.preventDefault());
+  await refresh();
+
+  async function save() {
+    const data = {};
+    for (const n of ['process_id', 'job_traveller_id', 'date', 'slot', 'good_qty', 'reject_qty', 'run_min', 'downtime_min', 'machine', 'remark']) data[n] = form.elements[n].value;
+    data.extra = {};
+    form.querySelectorAll('[data-extra]').forEach((el) => { if (el.value.trim()) data.extra[el.dataset.extra] = el.value.trim(); });
+    try {
+      const saved = row ? await api('PUT', `/api/operator_outputs/${row.id}`, data) : await api('POST', '/api/operator_outputs', data);
+      toast('Output saved');
+      if (onSaved) onSaved(saved);
+    } catch (e) { err.replaceChildren(h('div', { class: 'msg err' }, e.message)); }
+  }
+  const buttons = [
+    onCancel ? h('button', { class: 'btn', onclick: onCancel }, editable ? 'Cancel' : 'Close') : null,
+    editable ? h('button', { class: 'btn primary', onclick: save }, row ? 'Save' : 'Save output') : null,
+  ];
+  return { body: [err, form], buttons };
+}
+
+async function outputDialog(row, preset, reload) {
+  let closeFn;
+  const f = await outputForm(row, preset, () => { closeFn(); if (reload) reload(); }, () => closeFn());
+  closeFn = openModal(row ? 'Operator output' : 'New operator output', f.body, () => f.buttons);
+}
+
+async function viewOperator() {
+  const jt = Number(new URLSearchParams(location.hash.split('?')[1] || '').get('jt')) || null;
+  const f = await outputForm(null, jt ? { job_traveller_id: jt } : {}, () => route());
+  return [
+    h('h1', {}, 'Operator form'),
+    h('p', { class: 'muted' }, 'One form for every process. Choose the process and Job Traveller, then key in the output for this session.'),
+    h('div', { class: 'panel' }, f.body, h('div', { class: 'toolbar reply-actions' }, h('span', { class: 'grow' }), f.buttons)),
+    h('h2', {}, 'Output recorded today'),
+    recordTable('operator_outputs', { filter: { date: localToday() }, onRow: (r, reload) => outputDialog(r, {}, reload) }),
+  ];
+}
+
 async function viewUsers() {
   const box = h('div');
   async function load() {
@@ -642,11 +800,12 @@ function renderLogin(message) {
 function renderShell() {
   const groups = {};
   for (const [name, r] of Object.entries(state.meta.resources)) {
-    if (name === 'drawings') continue;
+    if (name === 'drawings' || r.nav === false) continue;
     (groups[r.group] = groups[r.group] || []).push([`#/r/${name}`, r.label]);
   }
   groups.Engineering = [['#/drawings', 'Drawings'], ...(groups.Engineering || [])];
   const daily = [['#/daily', 'Daily board'], ...(groups['Daily work'] || [])];
+  groups.Production = [['#/operator', 'Operator form'], ...(groups.Production || [])];
   delete groups['Daily work'];
   const nav = h('nav', { class: 'side', id: 'side' },
     h('div', { class: 'brand' }, h('img', { src: 'icon.svg', alt: '' }), 'Sheet Metal Manager'),
@@ -665,7 +824,7 @@ function renderShell() {
 
 async function route() {
   if (!state.user) return;
-  const hash = location.hash.replace(/^#\/?/, '');
+  const hash = location.hash.replace(/^#\/?/, '').split('?')[0];
   const [a, b, c] = hash.split('/');
   document.querySelectorAll('.side a').forEach((el) => el.classList.toggle('on', el.getAttribute('href') === `#/${a ? [a, b].filter(Boolean).join('/') : ''}`));
   document.getElementById('side').classList.remove('open');
@@ -677,6 +836,8 @@ async function route() {
     else if (a === 'drawings') view = viewDrawings();
     else if (a === 'daily') view = await viewDaily(b);
     else if (a === 'issue') view = await viewIssue(Number(b));
+    else if (a === 'jt') view = await viewJobTraveller(Number(b));
+    else if (a === 'operator') view = await viewOperator();
     else if (a === 'project') view = await viewProject(Number(b));
     else if (a === 'ncr' && c === 'print') view = await viewNcrPrint(Number(b));
     else if (a === 'users') view = await viewUsers();

@@ -11,6 +11,20 @@ const PROCESSES = ['Designer', 'Planner', 'Engineer', 'Technician', 'Supervisor'
 const EVERYONE = ['admin', 'planner', 'viewer'];
 
 const resources = {
+  shop_processes: {
+    label: 'Shop processes', singular: 'Process', group: 'Production',
+    // Admin adds a new process here; the Operator form and Excel import pick it up without code changes.
+    write: ['admin'],
+    display: 'name',
+    fields: [
+      { name: 'code', label: 'Code', type: 'text', required: true, unique: true, help: 'Short word found in report titles, e.g. LASER, BEND.' },
+      { name: 'name', label: 'Name', type: 'text', required: true, unique: true },
+      { name: 'seq', label: 'Order in flow', type: 'number' },
+      { name: 'unit', label: 'Output counted per', type: 'select', options: ['Piece', 'Sheet'], default: 'Piece' },
+      { name: 'extra_fields', label: 'Extra fields on Operator form', type: 'text', help: 'Comma separated, e.g. Sand disc grit, Program / nesting ID' },
+      { name: 'active', label: 'Active', type: 'select', options: ['Yes', 'No'], default: 'Yes' },
+    ],
+  },
   projects: {
     label: 'Projects', singular: 'Project', group: 'Planning',
     write: ['admin', 'planner'],
@@ -172,6 +186,58 @@ const resources = {
       { name: 'verification', label: '6. Verification', type: 'textarea', list: false },
       { name: 'raised_by', label: 'Raised by', type: 'text' },
       { name: 'status', label: 'Status', type: 'select', options: ['Open', 'Closed'], default: 'Open' },
+    ],
+  },
+  job_travellers: {
+    label: 'Job Traveller', singular: 'Job Traveller', group: 'Production',
+    write: ['admin', 'planner'],
+    display: 'jt_no',
+    fields: [
+      { name: 'jt_no', label: 'JT no.', type: 'text', unique: true, help: 'Leave empty for an automatic number.' },
+      { name: 'project_id', label: 'Project', type: 'ref', ref: 'projects' },
+      { name: 'customer', label: 'Customer', type: 'text' },
+      { name: 'part_no', label: 'Part number', type: 'text', required: true },
+      { name: 'drawing_no', label: 'Drawing no.', type: 'text' },
+      { name: 'description', label: 'Description', type: 'text' },
+      { name: 'material', label: 'Material', type: 'select', options: MATERIALS },
+      { name: 'thickness', label: 'Thickness (mm)', type: 'number' },
+      { name: 'qty', label: 'Required qty (pcs)', type: 'number', required: true },
+      { name: 'due_date', label: 'Due date', type: 'date' },
+      { name: 'status', label: 'Status', type: 'select', options: ['Planned', 'In progress', 'Completed', 'On hold', 'Cancelled'], default: 'Planned' },
+      { name: 'notes', label: 'Notes', type: 'textarea', list: false },
+    ],
+  },
+  jt_steps: {
+    label: 'Job Traveller steps', singular: 'Step', group: 'Production', nav: false,
+    write: ['admin', 'planner'],
+    display: 'seq',
+    fields: [
+      { name: 'job_traveller_id', label: 'Job Traveller', type: 'ref', ref: 'job_travellers', required: true },
+      { name: 'process_id', label: 'Process', type: 'ref', ref: 'shop_processes', required: true },
+      { name: 'seq', label: 'Seq', type: 'number' },
+      { name: 'cycle_min', label: 'Cycle time (min)', type: 'number' },
+      { name: 'target_qty', label: 'Target qty', type: 'number' },
+      { name: 'details', label: 'Details', type: 'text', help: 'e.g. 5 PEM nuts, 8 bends, grit 80' },
+    ],
+  },
+  operator_outputs: {
+    label: 'Operator output', singular: 'Output', group: 'Production',
+    // One form for every shop process; extra holds that process's own fields.
+    write: EVERYONE, ownerField: 'operator',
+    display: 'date',
+    fields: [
+      { name: 'date', label: 'Date', type: 'date', required: true },
+      { name: 'process_id', label: 'Process', type: 'ref', ref: 'shop_processes', required: true },
+      { name: 'job_traveller_id', label: 'Job Traveller', type: 'ref', ref: 'job_travellers', required: true },
+      { name: 'slot', label: 'Session / time slot', type: 'text' },
+      { name: 'machine', label: 'Machine', type: 'text' },
+      { name: 'good_qty', label: 'Good qty', type: 'number', required: true },
+      { name: 'reject_qty', label: 'Reject qty', type: 'number', default: 0 },
+      { name: 'run_min', label: 'Run time (min)', type: 'number' },
+      { name: 'downtime_min', label: 'Downtime (min)', type: 'number', default: 0 },
+      { name: 'extra', label: 'Process fields', type: 'json', list: false },
+      { name: 'remark', label: 'Remark', type: 'text' },
+      { name: 'operator', label: 'Operator', type: 'text', readonly: true },
     ],
   },
   daily_logs: {

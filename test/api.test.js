@@ -282,3 +282,72 @@ test('an older database gets the process column and discussion table', () => {
   assert.ok(upgraded.prepare("SELECT name FROM sqlite_master WHERE name = 'issue_replies'").get());
   upgraded.close();
 });
+
+test('NEWAYS shop processes are there and Admin can add another one', async () => {
+  const list = await call(planner, 'GET', '/api/shop_processes');
+  assert.deepEqual(list.data.map((p) => p.code).sort(), ['BEND', 'CLINCH', 'LASER', 'POLISH']);
+  assert.equal((await call(planner, 'POST', '/api/shop_processes', { code: 'WELD', name: 'Welding' })).status, 403);
+  const w = await call(admin, 'POST', '/api/shop_processes', { code: 'WELD', name: 'Welding', seq: 50, extra_fields: 'Wire size' });
+  assert.equal(w.status, 201);
+  assert.equal(w.data.active, 'Yes');
+});
+
+// Same columns as the Fact_Production table in the combined production dashboard.
+const FACT_CSV = [
+  'Record_ID,Machine_Cell,Stage_Order,Master_Part_No,Material_Type,Thickness_mm,Physical_Order_Qty,Process_Target_Pcs,Cycle_Time_Min,Live_Actual_Good_Pcs',
+  'FACT-01,Polishing,Stage 1,JT-TEST_PART_1,Aluminium,1.5,375,375,1.33333,355',
+  'FACT-07,Bending,Stage 2,JT-TEST_PART_1,Aluminium,1.5,375,375,2.5,24',
+  'FACT-11,Self-Clinching,Stage 3,JT-TEST_PART_1,Aluminium,1.5,375,375,2.91667,0',
+  'FACT-03,Polishing,Stage 1,JT-TEST_PART_2,Stainless Steel,1.5,182,182,0.83333,0',
+  'TOTAL,All 3 Machine Cells,3 Stages,4 Routing Operations,Alu & SUS304,1.5,1114,1114,,379',
+].join('\r\n');
+
+test('Job Traveller import: preview first, then one traveller per part with its routing', async () => {
+  const url = '/api/job_travellers/import?filename=combined.csv';
+  assert.equal((await call(viewer, 'POST', url, Buffer.from(FACT_CSV))).status, 401); // viewer1 was disabled earlier
+  const preview = await call(planner, 'POST', url, Buffer.from(FACT_CSV));
+  assert.equal(preview.status, 200);
+  assert.equal(preview.data.lines.length, 4);
+  assert.deepEqual(preview.data.lines.map((l) => l.process), ['Polishing', 'Bending', 'Clinching', 'Polishing']);
+  assert.equal((await call(planner, 'GET', '/api/job_travellers?part_no=JT-TEST_PART_1')).data.length, 0, 'preview saves nothing');
+
+  const done = await call(planner, 'POST', `${url}&commit=1`, Buffer.from(FACT_CSV));
+  assert.equal(done.status, 200);
+  const jts = (await call(planner, 'GET', '/api/job_travellers')).data.filter((j) => j.part_no.startsWith('JT-TEST'));
+  assert.equal(jts.length, 2);
+  const jt1 = jts.find((j) => j.part_no === 'JT-TEST_PART_1');
+  assert.match(jt1.jt_no, /^JT-\d{4}-\d{4}$/);
+  assert.equal(jt1.material, 'Aluminium');
+  const prog = (await call(planner, 'GET', `/api/job_travellers/${jt1.id}/progress`)).data;
+  assert.deepEqual(prog.map((s) => [s.process, s.target_qty, s.good]), [['Polishing', 375, 355], ['Bending', 375, 24], ['Clinching', 375, 0]]);
+
+  // Importing again updates the same travellers and does not double the recorded output.
+  await call(planner, 'POST', `${url}&commit=1`, Buffer.from(FACT_CSV));
+  const again = (await call(planner, 'GET', '/api/job_travellers')).data.filter((j) => j.part_no.startsWith('JT-TEST'));
+  assert.equal(again.length, 2);
+  assert.equal((await call(planner, 'GET', `/api/job_travellers/${jt1.id}/progress`)).data[0].good, 355);
+
+  const bad = await call(planner, 'POST', '/api/job_travellers/import?filename=x.csv', Buffer.from('a,b\n1,2'));
+  assert.equal(bad.status, 400);
+  assert.equal((await call(planner, 'POST', '/api/job_travellers/import?filename=x.pdf', Buffer.from('x'))).status, 400);
+});
+
+test('one Operator form records output for any process; only the operator or Admin edits it', async () => {
+  const opS = await login('op1', 'password123');
+  const techS = await login('tech1', 'password123');
+  const jt = (await call(opS, 'GET', '/api/job_travellers?part_no=JT-TEST_PART_1')).data[0];
+  const bend = (await call(opS, 'GET', '/api/shop_processes?code=BEND')).data[0];
+  const out = await call(opS, 'POST', '/api/operator_outputs', {
+    process_id: bend.id, job_traveller_id: jt.id, good_qty: 40, reject_qty: 1, run_min: 100, extra: { 'No. of bends': '4' }, operator: 'x' });
+  assert.equal(out.status, 201);
+  assert.equal(out.data.operator, 'op1');
+  assert.equal(JSON.parse(out.data.extra)['No. of bends'], '4');
+  assert.ok(out.data.date);
+  assert.equal((await call(opS, 'POST', '/api/operator_outputs', { process_id: bend.id, job_traveller_id: jt.id, good_qty: 1, extra: [1] })).status, 400);
+  assert.equal((await call(techS, 'PUT', `/api/operator_outputs/${out.data.id}`, { good_qty: 400 })).status, 403);
+  assert.equal((await call(opS, 'PUT', `/api/operator_outputs/${out.data.id}`, { good_qty: 41 })).data.good_qty, 41);
+  const prog = (await call(opS, 'GET', `/api/job_travellers/${jt.id}/progress`)).data;
+  assert.equal(prog.find((s) => s.process === 'Bending').good, 24 + 41);
+  assert.equal((await call(planner, 'POST', '/api/job_travellers', { part_no: 'MANUAL-1', qty: 10 })).data.jt_no.startsWith('JT-'), true);
+  assert.equal((await call(opS, 'POST', '/api/job_travellers', { part_no: 'X', qty: 1 })).status, 403);
+});

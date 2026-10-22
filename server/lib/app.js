@@ -7,6 +7,7 @@ const { ROLES, can, rightsFor } = require('./perm');
 const auth = require('./auth');
 const { FORMATS, MIME, parseDrawingName, safeFilename } = require('./drawings');
 const { buildDashboard } = require('./dashboard');
+const { readJobTravellers } = require('./jtimport');
 
 const VERSION = require('../../package.json').version;
 const PUBLIC_DIR = path.join(__dirname, '..', '..', 'public');
@@ -134,7 +135,13 @@ function createApp({ db, drawingsDir, secureCookies = false }) {
       let v = input[f.name];
       if (v === '' || v === undefined) v = null;
       if (v !== null) {
-        if (f.type === 'number' || f.type === 'ref') {
+        if (f.type === 'json') {
+          if (typeof v === 'string') { try { v = JSON.parse(v); } catch { v = null; } }
+          const ok = v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).length <= 30 &&
+            Object.values(v).every((x) => ['string', 'number'].includes(typeof x) && String(x).length <= 500);
+          if (!ok) { errors.push(`${f.label} must be a list of short values`); continue; }
+          v = JSON.stringify(v);
+        } else if (f.type === 'number' || f.type === 'ref') {
           const n = Number(v);
           if (!Number.isFinite(n)) { errors.push(`${f.label} must be a number`); continue; }
           v = f.type === 'ref' ? Math.trunc(n) : n;
@@ -174,6 +181,7 @@ function createApp({ db, drawingsDir, secureCookies = false }) {
       if (blank('date')) out.date = localToday();
       if (blank('process') && user.process) out.process = user.process;
     }
+    if (name === 'operator_outputs' && blank('date')) out.date = localToday();
     if (name === 'issues') {
       if (blank('opened')) out.opened = localToday();
       if (blank('from_process') && user.process) out.from_process = user.process;
@@ -189,6 +197,8 @@ function createApp({ db, drawingsDir, secureCookies = false }) {
       if (['Resolved', 'Closed'].includes(data.status) && !data.resolved) data.resolved = localToday();
     }
     if (name === 'daily_logs') data.logged_by = user.username;
+    if (name === 'operator_outputs') data.operator = user.username;
+    if (name === 'job_travellers' && !data.jt_no) data.jt_no = nextNumber('job_travellers', 'jt_no', 'JT');
     const cols = Object.keys(data);
     try {
       const r = db.prepare(`INSERT INTO ${name} (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
@@ -303,6 +313,69 @@ function createApp({ db, drawingsDir, secureCookies = false }) {
     db.exec('COMMIT');
     audit(user, 'generate-workflow', 'parts', partId);
     return listRecords('wf_steps', new URLSearchParams({ part_id: String(partId) }));
+  }
+
+  // ---- job travellers ----------------------------------------------------
+
+  // Target, good and reject per process step, summed from the Operator form.
+  function jtProgress(id) {
+    getRecord('job_travellers', id);
+    return db.prepare(`
+      SELECT s.id, s.seq, s.cycle_min, s.target_qty, s.details, p.id AS process_id, p.name AS process, p.unit,
+        COALESCE(SUM(o.good_qty), 0) AS good, COALESCE(SUM(o.reject_qty), 0) AS reject, COALESCE(SUM(o.run_min), 0) AS run_min
+      FROM jt_steps s JOIN shop_processes p ON p.id = s.process_id
+      LEFT JOIN operator_outputs o ON o.job_traveller_id = s.job_traveller_id AND o.process_id = s.process_id
+      WHERE s.job_traveller_id = ? GROUP BY s.id ORDER BY COALESCE(s.seq, p.seq), p.seq`).all(id);
+  }
+
+  // Excel/CSV import. Without commit=1 it only shows what would change.
+  async function importJobTravellers(req, url, user) {
+    allow(user, 'create', 'job_travellers');
+    const filename = safeFilename(url.searchParams.get('filename') || 'import.xlsx');
+    if (!/\.(xlsx|csv)$/i.test(filename)) throw new HttpError(400, 'Use an .xlsx or .csv file');
+    const body = await readBody(req, 20 * 1024 * 1024);
+    const processes = db.prepare('SELECT id, code, name, seq FROM shop_processes').all();
+    let parsed;
+    try { parsed = readJobTravellers(body, filename, processes); } catch (err) { throw new HttpError(400, err.message); }
+    const projectId = Number(url.searchParams.get('project_id')) || null;
+    const find = db.prepare("SELECT id, jt_no FROM job_travellers WHERE part_no = ? AND status NOT IN ('Completed','Cancelled') ORDER BY id LIMIT 1");
+    const plan = parsed.lines.map((l) => {
+      const jt = find.get(l.part_no) || (!/_PART_/i.test(l.part_no) && find.get(`${l.part_no}_PART_1`)) || null;
+      return { ...l, jt_id: jt ? jt.id : null, jt_no: jt ? jt.jt_no : null, action: jt ? 'update' : 'new' };
+    });
+    const result = { file: filename, sheet: parsed.sheet, lines: plan };
+    if (url.searchParams.get('commit') !== '1') return result;
+
+    db.exec('BEGIN');
+    try {
+      for (const l of plan) {
+        const known = l.jt_id || plan.find((x) => x !== l && x.jt_id && x.part_no === l.part_no);
+        if (known && !l.jt_id) Object.assign(l, { jt_id: known.jt_id, jt_no: known.jt_no });
+        if (!l.jt_id) {
+          const rec = createRecord('job_travellers', { project_id: projectId, part_no: l.part_no, drawing_no: l.drawing_no || null,
+            material: l.material, thickness: l.thickness, qty: l.qty, status: 'Planned' }, user);
+          Object.assign(l, { jt_id: rec.id, jt_no: rec.jt_no });
+        }
+        if (!l.process_id) continue;
+        const step = db.prepare('SELECT id FROM jt_steps WHERE job_traveller_id = ? AND process_id = ?').get(l.jt_id, l.process_id);
+        if (step) {
+          db.prepare("UPDATE jt_steps SET cycle_min = COALESCE(?, cycle_min), seq = COALESCE(?, seq), target_qty = ?, updated_at = datetime('now') WHERE id = ?")
+            .run(l.cycle_min, l.seq, l.qty, step.id);
+        } else {
+          db.prepare('INSERT INTO jt_steps (job_traveller_id, process_id, seq, cycle_min, target_qty) VALUES (?, ?, ?, ?, ?)')
+            .run(l.jt_id, l.process_id, l.seq, l.cycle_min, l.qty);
+        }
+        // Output already recorded in the report is brought in once, so progress matches it.
+        const hasOutput = db.prepare('SELECT 1 FROM operator_outputs WHERE job_traveller_id = ? AND process_id = ?').get(l.jt_id, l.process_id);
+        if (l.good > 0 && !hasOutput) {
+          createRecord('operator_outputs', { date: localToday(), process_id: l.process_id, job_traveller_id: l.jt_id,
+            good_qty: l.good, reject_qty: 0, downtime_min: 0, remark: `Imported from ${filename}` }, user);
+        }
+      }
+      db.exec('COMMIT');
+    } catch (err) { db.exec('ROLLBACK'); throw friendlyDbError(err); }
+    audit(user, 'import', 'job_travellers', null);
+    return { ...result, committed: true };
   }
 
   // ---- issue discussion -------------------------------------------------
@@ -473,6 +546,13 @@ function createApp({ db, drawingsDir, secureCookies = false }) {
     }
     if (parts[0] === 'drawings' && parts[2] === 'file' && method === 'GET') {
       return sendDrawing(res, Number(parts[1]), user, url.searchParams.get('download') === '1');
+    }
+    if (parts[0] === 'job_travellers' && parts[1] === 'import' && method === 'POST') {
+      return send(res, 200, await importJobTravellers(req, url, user));
+    }
+    if (parts[0] === 'job_travellers' && parts[2] === 'progress' && method === 'GET') {
+      allow(user, 'read', 'job_travellers');
+      return send(res, 200, jtProgress(Number(parts[1])));
     }
     if (parts[0] === 'issues' && parts[2] === 'replies' && parts.length === 3) {
       const issueId = Number(parts[1]);

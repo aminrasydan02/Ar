@@ -5,7 +5,7 @@ const { DatabaseSync } = require('node:sqlite');
 const { resources, columnType } = require('./resources');
 const { hashPassword } = require('./auth');
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 function open(file) {
   if (file !== ':memory:') fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -75,6 +75,15 @@ function migrate(db) {
     );
     CREATE INDEX IF NOT EXISTS ix_issue_replies_issue ON issue_replies(issue_id);
   `);
+  // The four NEWAYS shop processes, added once. Admin can add more later.
+  if (!db.prepare("SELECT 1 FROM meta WHERE key = 'shop_processes_seeded'").get()) {
+    const ins = db.prepare('INSERT OR IGNORE INTO shop_processes (code, name, seq, unit, extra_fields) VALUES (?, ?, ?, ?, ?)');
+    ins.run('LASER', 'Laser Cutting', 10, 'Sheet', 'Program / nesting ID, Sheets cut');
+    ins.run('CLINCH', 'Clinching', 20, 'Piece', 'Clinch type');
+    ins.run('BEND', 'Bending', 30, 'Piece', 'No. of bends');
+    ins.run('POLISH', 'Polishing', 40, 'Piece', 'Sand disc grit');
+    db.prepare("INSERT INTO meta (key, value) VALUES ('shop_processes_seeded', '1')").run();
+  }
   db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run('schema_version', String(SCHEMA_VERSION));
 }
 
