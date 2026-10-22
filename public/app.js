@@ -47,12 +47,17 @@ const STATUS_CLASS = {
   'Blocked': 'bad', 'Resolved': 'ok', 'Urgent': 'bad', 'High': 'warn',
 };
 const pill = (v) => h('span', { class: `pill ${STATUS_CLASS[v] ?? ''}` }, v);
+// Numbers with thousands separators and at most 2 decimals; dates as DD/MM/YYYY.
+const fmtNum = (n, d = 2) => (n === null || n === undefined || n === '' ? '' : Number(n).toLocaleString('en-MY', { maximumFractionDigits: d }));
+const fmtDate = (s) => (/^\d{4}-\d{2}-\d{2}/.test(s || '') ? `${s.slice(8, 10)}/${s.slice(5, 7)}/${s.slice(0, 4)}${s.length > 10 ? s.slice(10, 16) : ''}` : s || '');
+const fmtPct = (n) => `${fmtNum(n, 1)}%`;
 
 function cellValue(field, row) {
   const v = field.type === 'ref' ? row[`${field.name}__label`] : row[field.name];
   if (v === null || v === undefined || v === '') return '';
   if (['status', 'condition', 'kind', 'priority'].includes(field.name)) return pill(v);
-  if (field.type === 'number') return Number(v).toLocaleString();
+  if (field.type === 'number') return fmtNum(v);
+  if (field.type === 'date') return fmtDate(v);
   return String(v);
 }
 
@@ -219,9 +224,26 @@ function recordTable(resName, { filter = {}, extra = [], rowActions, columns, on
 async function viewDashboard() {
   const d = await api('GET', '/api/dashboard');
   const k = d.kpi;
-  const tile = (n, l, alert) => h('div', { class: `kpi${alert && n ? ' alert' : ''}` }, h('div', { class: 'n' }, Number(n).toLocaleString()), h('div', { class: 'l' }, l));
+  const tile = (n, l, alert) => h('div', { class: `kpi${alert && n ? ' alert' : ''}` }, h('div', { class: 'n' }, typeof n === 'number' ? fmtNum(n) : n), h('div', { class: 'l' }, l));
+  const pr = d.production;
   return [
     h('h1', {}, 'Dashboard'),
+    h('h2', {}, `Production by process (net ${d.minutesPerDay} min/day)`),
+    h('div', { class: 'kpis' },
+      tile(pr.target, 'Process target (pcs)'), tile(pr.good, 'Actual good (pcs)'), tile(pr.balance, 'Remaining balance (pcs)'),
+      tile(fmtPct(pr.completion), 'Overall completion'), tile(fmtPct(pr.yield), 'First-pass yield'),
+      tile(fmtNum(pr.remaining_min / 60, 1), 'Remaining workload (hrs)')),
+    h('div', { class: 'table-wrap gap-top' }, h('table', {},
+      h('thead', {}, h('tr', {}, ['Process', 'Steps', 'Target', 'Good', 'Reject', 'Balance', 'Completion', 'Yield', 'Remaining (min)', 'Days', ''].map((t) => h('th', {}, t)))),
+      h('tbody', {}, d.processes.map((p) => {
+        const bar = h('div'); bar.style.width = `${Math.min(100, p.completion)}%`;
+        return h('tr', {}, h('td', {}, p.name), h('td', { class: 'num' }, p.steps), h('td', { class: 'num' }, fmtNum(p.target)),
+          h('td', { class: 'num' }, fmtNum(p.good)), h('td', { class: 'num' }, fmtNum(p.reject)), h('td', { class: 'num' }, fmtNum(p.balance)),
+          h('td', {}, h('div', { class: 'bar' }, bar), ` ${fmtPct(p.completion)}`), h('td', { class: 'num' }, fmtPct(p.yield)),
+          h('td', { class: 'num' }, fmtNum(p.remaining_min, 1)), h('td', { class: 'num' }, fmtNum(p.remaining_days)),
+          h('td', {}, p.bottleneck ? h('span', { class: 'pill bad' }, 'Bottleneck') : ''));
+      })))),
+    h('h2', {}, 'Overview'),
     h('div', { class: 'kpis' },
       tile(k.active_projects, 'Active projects'), tile(k.parts, 'Parts'), tile(k.total_pcs, 'Total pieces'),
       tile(k.drawings, 'Current drawings'), tile(k.open_ncrs, 'Open NCRs', true), tile(k.open_work_orders, 'Open maintenance', true),
@@ -236,7 +258,7 @@ async function viewDashboard() {
         const bar = h('div');
         bar.style.width = `${pct}%`;
         return h('tr', { class: 'click', onclick: () => { location.hash = `#/project/${p.id}`; } },
-          h('td', {}, p.code), h('td', {}, p.name), h('td', {}, p.customer || ''), h('td', {}, p.due_date || ''),
+          h('td', {}, p.code), h('td', {}, p.name), h('td', {}, p.customer || ''), h('td', {}, fmtDate(p.due_date)),
           h('td', {}, pill(p.status)), h('td', { class: 'num' }, p.parts),
           h('td', {}, h('div', { class: 'bar', title: `${p.steps_done}/${p.steps} steps` }, bar), ` ${pct}%`));
       })))) : h('div', { class: 'panel muted' }, 'No active projects.'),
@@ -252,7 +274,7 @@ async function viewDashboard() {
         h('div', { class: 'table-wrap' }, h('table', {},
           h('thead', {}, h('tr', {}, ['Machine', 'Type', 'Status', 'Load (min)', 'Days'].map((t) => h('th', {}, t)))),
           h('tbody', {}, d.load.map((m) => h('tr', {}, h('td', {}, m.code), h('td', {}, m.machine_type || ''), h('td', {}, pill(m.status)),
-            h('td', { class: 'num' }, Math.round(m.load_min).toLocaleString()), h('td', { class: 'num' }, m.load_days))))))),
+            h('td', { class: 'num' }, fmtNum(m.load_min, 0)), h('td', { class: 'num' }, fmtNum(m.load_days)))))))),
       h('div', {}, h('h2', {}, 'Maintenance, last 30 days'),
         h('div', { class: 'table-wrap' }, h('table', {},
           h('thead', {}, h('tr', {}, ['Machine', 'Breakdowns', 'Downtime (min)', 'Availability', 'MTBF', 'MTTR'].map((t) => h('th', {}, t)))),
@@ -423,9 +445,10 @@ async function viewNcrPrint(id) {
       h('button', { class: 'btn primary', onclick: () => window.print() }, 'Print / Save as PDF'),
       h('a', { class: 'btn', href: '#/r/ncrs' }, 'Back to NCR list')),
     h('div', { class: 'print-page' },
-      h('h1', {}, 'Nonconformance Report'),
+      h('div', { class: 'doc-head' }, h('div', {}, h('div', { class: 'company' }, state.meta.company), h('h1', {}, 'NONCONFORMANCE REPORT')),
+        h('div', { class: 'doc-no' }, n.ncr_no)),
       h('table', {},
-        h('tr', {}, h('th', {}, 'NCR no.'), h('td', {}, n.ncr_no), h('th', {}, 'Date'), h('td', {}, n.date)),
+        h('tr', {}, h('th', {}, 'NCR no.'), h('td', {}, n.ncr_no), h('th', {}, 'Date'), h('td', {}, fmtDate(n.date))),
         h('tr', {}, h('th', {}, 'Project'), h('td', {}, n.project_id__label || ''), h('th', {}, 'Part number'), h('td', {}, n.part_no || '')),
         h('tr', {}, h('th', {}, 'Qty affected'), h('td', {}, n.qty_affected ?? ''), h('th', {}, 'Status'), h('td', {}, n.status))),
       h('br'),
@@ -446,7 +469,7 @@ function issueTable(rows) {
     h('thead', {}, h('tr', {}, ['Issue', 'Problem', 'From → To', 'Priority', 'Status', 'Opened', 'Due'].map((t) => h('th', {}, t)))),
     h('tbody', {}, rows.map((i) => h('tr', { class: 'click', onclick: () => { location.hash = `#/issue/${i.id}`; } },
       h('td', {}, i.issue_no), h('td', { class: 'wrap' }, i.title), h('td', {}, `${i.from_process} → ${i.to_process}`),
-      h('td', {}, pill(i.priority)), h('td', {}, pill(i.status)), h('td', {}, i.opened || ''), h('td', {}, i.due_date || ''))))));
+      h('td', {}, pill(i.priority)), h('td', {}, pill(i.status)), h('td', {}, fmtDate(i.opened)), h('td', {}, fmtDate(i.due_date)))))));
 }
 
 // One column per process, in the order work passes from design to the shop floor.
@@ -527,7 +550,7 @@ async function viewIssue(id) {
     h('div', { class: 'panel' },
       h('div', { class: 'kpis' },
         [['From', issue.from_process], ['Needs action from', issue.to_process], ['Project', issue.project_id__label], ['Part', issue.part_no],
-          ['Opened', issue.opened], ['Due', issue.due_date], ['Resolved', issue.resolved], ['Raised by', issue.raised_by]]
+          ['Opened', fmtDate(issue.opened)], ['Due', fmtDate(issue.due_date)], ['Resolved', fmtDate(issue.resolved)], ['Raised by', issue.raised_by]]
           .map(([l, v]) => h('div', {}, h('div', { class: 'muted' }, l), h('div', {}, v || '—'))),
         h('div', {}, h('div', { class: 'muted' }, 'Priority'), pill(issue.priority)),
         h('div', {}, h('div', { class: 'muted' }, 'Status'), pill(issue.status))),
@@ -536,7 +559,7 @@ async function viewIssue(id) {
     h('h2', {}, `Discussion (${replies.length})`),
     h('div', { class: 'thread' },
       replies.length ? replies.map((r) => h('div', { class: `reply${r.username === state.user.username ? ' mine' : ''}` },
-        h('div', { class: 'muted small' }, r.username, r.process ? ` · ${r.process}` : '', ` · ${r.at} UTC`),
+        h('div', { class: 'muted small' }, r.username, r.process ? ` · ${r.process}` : '', ` · ${fmtDate(r.at)} UTC`),
         h('div', { class: 'pre' }, r.message))) : h('div', { class: 'panel muted' }, 'No replies yet. Use this to ask questions and share updates between processes.')),
     canEdit ? h('div', { class: 'panel reply-box' }, err, box,
       h('div', { class: 'toolbar reply-actions' }, h('span', { class: 'grow' }),
@@ -584,10 +607,11 @@ async function viewJobTraveller(id) {
   return [
     h('div', { class: 'toolbar' }, h('h1', { class: 'grow' }, `${jt.jt_no} — ${jt.part_no}`),
       h('a', { class: 'btn', href: `#/operator?jt=${jt.id}` }, 'Record output'),
+      h('a', { class: 'btn', href: `#/jt/${jt.id}/print` }, 'Print / PDF'),
       h('button', { class: 'btn', onclick: () => editRecord('job_travellers', jt, null, reload) }, right('job_travellers', 'update') ? 'Edit' : 'Details')),
     h('div', { class: 'panel' }, h('div', { class: 'kpis' },
       [['Project', jt.project_id__label], ['Customer', jt.customer], ['Drawing', jt.drawing_no], ['Material', [jt.material, jt.thickness && `${jt.thickness} mm`].filter(Boolean).join(' ')],
-        ['Qty', jt.qty], ['Due', jt.due_date]].map(([l, v]) => h('div', {}, h('div', { class: 'muted' }, l), h('div', {}, v || '—'))),
+        ['Qty', fmtNum(jt.qty)], ['Due', fmtDate(jt.due_date)]].map(([l, v]) => h('div', {}, h('div', { class: 'muted' }, l), h('div', {}, v || '—'))),
       h('div', {}, h('div', { class: 'muted' }, 'Status'), pill(jt.status)))),
     h('h2', {}, 'Routing and progress'),
     steps.length ? h('div', { class: 'table-wrap' }, h('table', {},
@@ -595,13 +619,44 @@ async function viewJobTraveller(id) {
       h('tbody', {}, steps.map((s) => {
         const pct = s.target_qty ? Math.min(100, Math.round((s.good / s.target_qty) * 100)) : 0;
         const bar = h('div'); bar.style.width = `${pct}%`;
-        return h('tr', {}, h('td', { class: 'num' }, s.seq ?? ''), h('td', {}, s.process), h('td', { class: 'num' }, s.cycle_min ?? ''),
-          h('td', { class: 'num' }, s.target_qty ?? ''), h('td', { class: 'num' }, s.good), h('td', { class: 'num' }, s.reject),
-          h('td', { class: 'num' }, s.target_qty != null ? Math.max(0, s.target_qty - s.good) : ''),
+        return h('tr', {}, h('td', { class: 'num' }, s.seq ?? ''), h('td', {}, s.process), h('td', { class: 'num' }, fmtNum(s.cycle_min)),
+          h('td', { class: 'num' }, fmtNum(s.target_qty)), h('td', { class: 'num' }, fmtNum(s.good)), h('td', { class: 'num' }, fmtNum(s.reject)),
+          h('td', { class: 'num' }, s.target_qty != null ? fmtNum(Math.max(0, s.target_qty - s.good)) : ''),
           h('td', {}, h('div', { class: 'bar' }, bar), ` ${pct}%`));
       })))) : h('div', { class: 'panel muted' }, 'No process steps yet.'),
     h('h2', {}, 'Steps'),
+    h('p', { class: 'muted' }, 'Seq sets the order of the processes. Add a step for each process this part goes through.'),
     recordTable('jt_steps', { filter: { job_traveller_id: jt.id }, columns: ['seq', 'process_id', 'cycle_min', 'target_qty', 'details'] }),
+  ];
+}
+
+// A4 Job Traveller that goes with the parts through the shop.
+async function viewJobTravellerPrint(id) {
+  const [jt, steps] = await Promise.all([api('GET', `/api/job_travellers/${id}`), api('GET', `/api/job_travellers/${id}/progress`)]);
+  const cell = (label, value) => [h('th', {}, label), h('td', {}, value ?? '')];
+  return [
+    h('div', { class: 'print-actions' },
+      h('button', { class: 'btn primary', onclick: () => window.print() }, 'Print / Save as PDF'),
+      h('a', { class: 'btn', href: `#/jt/${jt.id}` }, 'Back to Job Traveller')),
+    h('div', { class: 'print-page' },
+      h('div', { class: 'doc-head' }, h('div', {}, h('div', { class: 'company' }, state.meta.company), h('h1', {}, 'JOB TRAVELLER')),
+        h('div', { class: 'doc-no' }, jt.jt_no)),
+      h('table', {},
+        h('tr', {}, cell('Project', jt.project_id__label), cell('Customer', jt.customer)),
+        h('tr', {}, cell('Part number', jt.part_no), cell('Drawing no.', jt.drawing_no)),
+        h('tr', {}, cell('Description', jt.description), cell('Material', [jt.material, jt.thickness && `${fmtNum(jt.thickness)} mm`].filter(Boolean).join(' '))),
+        h('tr', {}, cell('Required qty (pcs)', fmtNum(jt.qty)), cell('Due date', fmtDate(jt.due_date)))),
+      h('h2', {}, 'Process routing'),
+      h('table', { class: 'route' },
+        h('tr', {}, ['Seq', 'Process', 'Details', 'Cycle (min/pc)', 'Target', 'Good', 'Reject', 'Date', 'Operator', 'QC'].map((t) => h('th', {}, t))),
+        steps.map((s) => h('tr', {}, h('td', {}, s.seq ?? ''), h('td', {}, s.process), h('td', {}, s.details || ''), h('td', { class: 'num' }, fmtNum(s.cycle_min)),
+          h('td', { class: 'num' }, fmtNum(s.target_qty)), h('td', { class: 'num' }, s.good ? fmtNum(s.good) : ''), h('td', { class: 'num' }, s.reject ? fmtNum(s.reject) : ''),
+          h('td', {}), h('td', {}), h('td', {})))),
+      jt.notes ? [h('h2', {}, 'Notes'), h('p', { class: 'pre' }, jt.notes)] : null,
+      h('table', { class: 'sign' },
+        h('tr', {}, ['Prepared by (Planner)', 'Checked by (Supervisor)', 'Verified by (QA / QC)', 'Approved by (Production Manager)'].map((t) => h('th', {}, t))),
+        h('tr', {}, [0, 1, 2, 3].map(() => h('td', {}, h('div', { class: 'sign-date' }, 'Date:'))))),
+      h('div', { class: 'print-foot muted' }, `Printed ${fmtDate(localToday())} · ${state.meta.company}`)),
   ];
 }
 
@@ -613,7 +668,7 @@ const extraNames = (p) => String((p && p.extra_fields) || '').split(',').map((x)
 
 // The one Operator form used by every shop process. `holder` gets the form; returns it.
 async function outputForm(row, preset, onSaved, onCancel) {
-  const [processes, jts] = await Promise.all([processList(), api('GET', '/api/job_travellers')]);
+  const [processes, jts, codes] = await Promise.all([processList(), api('GET', '/api/job_travellers'), api('GET', '/api/reason_codes')]);
   const v = { ...userPreset('operator_outputs'), ...(preset || {}), ...(row || {}) };
   const extra = (() => { try { return JSON.parse(v.extra || '{}'); } catch { return {}; } })();
   const editable = row ? right('operator_outputs', 'update') && (state.user.role === 'admin' || row.operator === state.user.username) : right('operator_outputs', 'create');
@@ -625,6 +680,15 @@ async function outputForm(row, preset, onSaved, onCancel) {
   const procSel = sel('process_id', processes.map((p) => ({ id: p.id, label: p.name })), v.process_id);
   const jtSel = h('select', { name: 'job_traveller_id', disabled: !editable });
   const extraBox = h('div', { class: 'form full' });
+  const rejectSel = h('select', { name: 'reject_code', disabled: !editable });
+  const downSel = h('select', { name: 'downtime_code', disabled: !editable });
+  // Reason codes for the chosen process, plus codes that apply to every process.
+  function fillCodes(pid) {
+    for (const [el, kind, value] of [[rejectSel, 'Reject', v.reject_code], [downSel, 'Downtime', v.downtime_code]]) {
+      const list = codes.filter((c) => c.kind === kind && (!c.process_id || c.process_id === pid)).sort((a, b) => a.code.localeCompare(b.code));
+      el.replaceChildren(h('option', { value: '' }, '—'), ...list.map((c) => h('option', { value: c.code, selected: c.code === value }, `${c.code} · ${c.description}`)));
+    }
+  }
   const targetNote = h('div', { class: 'help' });
 
   async function refresh() {
@@ -634,12 +698,13 @@ async function outputForm(row, preset, onSaved, onCancel) {
     const open = jts.filter((j) => (!pid || withStep.has(j.id) || j.id === Number(v.job_traveller_id)) && !['Completed', 'Cancelled'].includes(j.status));
     jtSel.replaceChildren(h('option', { value: '' }, ''), ...open.map((j) => h('option', { value: j.id, selected: j.id === Number(v.job_traveller_id) }, `${j.jt_no} · ${j.part_no}`)));
     const proc = processes.find((p) => p.id === pid);
+    fillCodes(pid);
     extraBox.replaceChildren(...extraNames(proc).map((n) => h('div', {}, h('label', {}, n), h('input', { type: 'text', 'data-extra': n, value: extra[n] ?? '', disabled: !editable }))));
     showTarget(steps);
   }
   function showTarget(steps) {
     const s = (steps || []).find((x) => x.job_traveller_id === Number(jtSel.value));
-    targetNote.textContent = s ? `Target ${s.target_qty ?? '—'} pcs, cycle ${s.cycle_min ?? '—'} min` : '';
+    targetNote.textContent = s ? `Target ${fmtNum(s.target_qty) || '—'} pcs · cycle ${fmtNum(s.cycle_min) || '—'} min/pc` : '';
   }
   procSel.addEventListener('change', () => { v.job_traveller_id = jtSel.value; refresh(); });
   jtSel.addEventListener('change', async () => showTarget(await api('GET', `/api/jt_steps?process_id=${procSel.value}`)));
@@ -653,6 +718,8 @@ async function outputForm(row, preset, onSaved, onCancel) {
     h('div', {}, h('label', {}, 'Reject qty'), num('reject_qty', v.reject_qty ?? 0)),
     h('div', {}, h('label', {}, 'Run time (min)'), num('run_min', v.run_min)),
     h('div', {}, h('label', {}, 'Downtime (min)'), num('downtime_min', v.downtime_min ?? 0)),
+    h('div', {}, h('label', {}, 'Reject code'), rejectSel),
+    h('div', {}, h('label', {}, 'Downtime code'), downSel),
     h('div', {}, h('label', {}, 'Machine'), txt('machine', v.machine)),
     h('div', {}, h('label', {}, 'Remark'), txt('remark', v.remark)),
     extraBox,
@@ -662,7 +729,7 @@ async function outputForm(row, preset, onSaved, onCancel) {
 
   async function save() {
     const data = {};
-    for (const n of ['process_id', 'job_traveller_id', 'date', 'slot', 'good_qty', 'reject_qty', 'run_min', 'downtime_min', 'machine', 'remark']) data[n] = form.elements[n].value;
+    for (const n of ['process_id', 'job_traveller_id', 'date', 'slot', 'good_qty', 'reject_qty', 'run_min', 'downtime_min', 'reject_code', 'downtime_code', 'machine', 'remark']) data[n] = form.elements[n].value;
     data.extra = {};
     form.querySelectorAll('[data-extra]').forEach((el) => { if (el.value.trim()) data.extra[el.dataset.extra] = el.value.trim(); });
     try {
@@ -808,7 +875,7 @@ function renderShell() {
   groups.Production = [['#/operator', 'Operator form'], ...(groups.Production || [])];
   delete groups['Daily work'];
   const nav = h('nav', { class: 'side', id: 'side' },
-    h('div', { class: 'brand' }, h('img', { src: 'icon.svg', alt: '' }), 'Sheet Metal Manager'),
+    h('div', { class: 'brand' }, h('img', { src: 'icon.svg', alt: '' }), h('div', {}, 'Sheet Metal Manager', h('div', { class: 'brand-sub' }, state.meta.company))),
     h('a', { href: '#/' }, 'Dashboard'),
     Object.entries({ 'Daily work': daily, ...groups }).map(([g, links]) => [h('h4', {}, g), links.map(([href, label]) => h('a', { href }, label))]),
     state.user.role === 'admin' ? [h('h4', {}, 'Admin'), h('a', { href: '#/users' }, 'Users'), h('a', { href: '#/audit' }, 'Activity log')] : null,
@@ -836,6 +903,7 @@ async function route() {
     else if (a === 'drawings') view = viewDrawings();
     else if (a === 'daily') view = await viewDaily(b);
     else if (a === 'issue') view = await viewIssue(Number(b));
+    else if (a === 'jt' && c === 'print') view = await viewJobTravellerPrint(Number(b));
     else if (a === 'jt') view = await viewJobTraveller(Number(b));
     else if (a === 'operator') view = await viewOperator();
     else if (a === 'project') view = await viewProject(Number(b));

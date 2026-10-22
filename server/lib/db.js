@@ -5,7 +5,7 @@ const { DatabaseSync } = require('node:sqlite');
 const { resources, columnType } = require('./resources');
 const { hashPassword } = require('./auth');
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 function open(file) {
   if (file !== ':memory:') fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -77,12 +77,31 @@ function migrate(db) {
   `);
   // The four NEWAYS shop processes, added once. Admin can add more later.
   if (!db.prepare("SELECT 1 FROM meta WHERE key = 'shop_processes_seeded'").get()) {
-    const ins = db.prepare('INSERT OR IGNORE INTO shop_processes (code, name, seq, unit, extra_fields) VALUES (?, ?, ?, ?, ?)');
+    const ins = db.prepare("INSERT OR IGNORE INTO shop_processes (code, name, seq, unit, extra_fields, active) VALUES (?, ?, ?, ?, ?, 'Yes')");
+    // Order as in the combined dashboard: Polishing -> Bending -> Clinching after laser cutting.
     ins.run('LASER', 'Laser Cutting', 10, 'Sheet', 'Program / nesting ID, Sheets cut');
-    ins.run('CLINCH', 'Clinching', 20, 'Piece', 'Clinch type');
+    ins.run('POLISH', 'Polishing', 20, 'Piece', 'Sand disc grit');
     ins.run('BEND', 'Bending', 30, 'Piece', 'No. of bends');
-    ins.run('POLISH', 'Polishing', 40, 'Piece', 'Sand disc grit');
+    ins.run('CLINCH', 'Clinching', 40, 'Piece', 'Clinch type');
     db.prepare("INSERT INTO meta (key, value) VALUES ('shop_processes_seeded', '1')").run();
+  }
+  // Standard reason codes from the Polishing report. Admin can add codes for other processes.
+  if (!db.prepare("SELECT 1 FROM meta WHERE key = 'reason_codes_seeded'").get()) {
+    const pol = db.prepare("SELECT id FROM shop_processes WHERE code = 'POLISH'").get();
+    const ins = db.prepare('INSERT OR IGNORE INTO reason_codes (code, kind, description, process_id) VALUES (?, ?, ?, ?)');
+    [
+      ['DT-01', 'Downtime', 'Sand disc replacement (80G / 120G wear)'],
+      ['DT-02', 'Downtime', 'Polishing head / belt tension adjustment'],
+      ['DT-03', 'Downtime', 'Part fixture changeover & calibration'],
+      ['DT-04', 'Downtime', 'First-piece QA inspection hold'],
+      ['DT-05', 'Downtime', 'Dust extraction / vacuum cleaning stop'],
+      ['RJ-01', 'Reject', 'Deep grit scratch / surface gouge'],
+      ['RJ-02', 'Reject', 'Incomplete / under-polished surface'],
+      ['RJ-03', 'Reject', 'Edge rounding / burr defect'],
+      ['RJ-04', 'Reject', 'Raw material surface pitting'],
+      ['RJ-05', 'Reject', 'Handling dent / post-polish mark'],
+    ].forEach(([code, kind, text]) => ins.run(code, kind, text, pol ? pol.id : null));
+    db.prepare("INSERT INTO meta (key, value) VALUES ('reason_codes_seeded', '1')").run();
   }
   db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run('schema_version', String(SCHEMA_VERSION));
 }

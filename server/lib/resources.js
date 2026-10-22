@@ -188,6 +188,17 @@ const resources = {
       { name: 'status', label: 'Status', type: 'select', options: ['Open', 'Closed'], default: 'Open' },
     ],
   },
+  reason_codes: {
+    label: 'Reason codes', singular: 'Reason code', group: 'Production',
+    write: ['admin'],
+    display: 'code',
+    fields: [
+      { name: 'code', label: 'Code', type: 'text', required: true, unique: true },
+      { name: 'kind', label: 'Kind', type: 'select', options: ['Downtime', 'Reject'], required: true },
+      { name: 'description', label: 'Description', type: 'text', required: true },
+      { name: 'process_id', label: 'Process', type: 'ref', ref: 'shop_processes', help: 'Leave empty to use it for every process.' },
+    ],
+  },
   job_travellers: {
     label: 'Job Traveller', singular: 'Job Traveller', group: 'Production',
     write: ['admin', 'planner'],
@@ -235,6 +246,8 @@ const resources = {
       { name: 'reject_qty', label: 'Reject qty', type: 'number', default: 0 },
       { name: 'run_min', label: 'Run time (min)', type: 'number' },
       { name: 'downtime_min', label: 'Downtime (min)', type: 'number', default: 0 },
+      { name: 'reject_code', label: 'Reject code', type: 'text' },
+      { name: 'downtime_code', label: 'Downtime code', type: 'text' },
       { name: 'extra', label: 'Process fields', type: 'json', list: false },
       { name: 'remark', label: 'Remark', type: 'text' },
       { name: 'operator', label: 'Operator', type: 'text', readonly: true },

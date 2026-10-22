@@ -28,7 +28,7 @@ class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
 }
 
-function createApp({ db, drawingsDir, secureCookies = false }) {
+function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Metal Department' }) {
   fs.mkdirSync(drawingsDir, { recursive: true });
 
   function send(res, status, body, headers = {}) {
@@ -533,7 +533,7 @@ function createApp({ db, drawingsDir, secureCookies = false }) {
       for (const [name, r] of Object.entries(resources)) {
         meta[name] = { ...r, fields: r.fields.filter((f) => !f.hidden) };
       }
-      return send(res, 200, { resources: meta, formats: FORMATS, roles: ROLES, processes: PROCESSES });
+      return send(res, 200, { resources: meta, formats: FORMATS, roles: ROLES, processes: PROCESSES, company });
     }
     if (parts[0] === 'dashboard' && method === 'GET') return send(res, 200, buildDashboard(db));
     if (parts[0] === 'users') return handleUsers(req, res, method, parts[1] ? Number(parts[1]) : null, user);

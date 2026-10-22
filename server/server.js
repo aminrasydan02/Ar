@@ -6,7 +6,8 @@
 //
 // Settings come from environment variables or config.json next to package.json:
 //   PORT (default 8080), HOST (default 0.0.0.0), DATA_DIR (default ./data),
-//   SECURE_COOKIES=1 when served over HTTPS, ADMIN_PASSWORD for the first admin.
+//   SECURE_COOKIES=1 when served over HTTPS, ADMIN_PASSWORD for the first admin,
+//   COMPANY (name printed on Job Travellers and reports).
 const fs = require('node:fs');
 const path = require('node:path');
 const http = require('node:http');
@@ -27,6 +28,7 @@ function loadConfig() {
     dataDir: path.resolve(ROOT, env.DATA_DIR || fromFile.dataDir || 'data'),
     secureCookies: (env.SECURE_COOKIES || String(fromFile.secureCookies || '')) === '1' || fromFile.secureCookies === true,
     adminPassword: env.ADMIN_PASSWORD || fromFile.adminPassword,
+    company: env.COMPANY || fromFile.company || 'NEWBILLION Precision Metal Sdn Bhd',
   };
 }
 
@@ -62,6 +64,7 @@ function main() {
     db: database,
     drawingsDir: path.join(cfg.dataDir, 'drawings'),
     secureCookies: cfg.secureCookies,
+    company: cfg.company,
   }));
   server.listen(cfg.port, cfg.host, () => {
     console.log(`Sheet Metal Manager ${VERSION} running at http://${cfg.host === '0.0.0.0' ? 'localhost' : cfg.host}:${cfg.port}`);

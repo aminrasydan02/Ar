@@ -153,6 +153,17 @@ td.wrap { white-space: normal; min-width: 200px; }
 .print-page table td, .print-page table th { white-space: normal; border: 1px solid #999; vertical-align: top; }
 .print-page .sec { min-height: 22mm; }
 .print-page .sign td { height: 18mm; }
+.doc-head { display: flex; justify-content: space-between; align-items: flex-end; border-bottom: 2px solid var(--navy); padding-bottom: 6px; margin-bottom: 12px; }
+.doc-head h1 { margin: 2px 0 0; letter-spacing: .04em; }
+.doc-head .company { font-weight: 600; color: var(--navy); }
+.doc-no { font-size: 18px; font-weight: 600; border: 2px solid var(--navy); padding: 4px 10px; }
+.print-page h2 { font-size: 14px; margin: 14px 0 6px; }
+.print-page .route td { height: 9mm; }
+.print-page .sign { margin-top: 14px; }
+.print-page .sign th { width: 25%; font-size: 11px; }
+.sign-date { font-size: 10px; color: var(--muted); margin-top: 12mm; }
+.print-foot { font-size: 10px; margin-top: 8px; text-align: right; }
+.brand-sub { font-size: 11px; font-weight: 400; color: #9fb3cc; }
 .print-actions { max-width: 210mm; margin: 12px auto; display: flex; gap: 8px; }
 
 @media (max-width: 860px) {

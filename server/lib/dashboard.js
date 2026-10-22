@@ -1,7 +1,7 @@
 'use strict';
-// Net working minutes per day: 08:00-17:30 less cleaning 08:00-08:15,
-// break 12:15-13:15 and setup 13:15-13:30.
-const MINUTES_PER_DAY = 480;
+// Net working minutes per day, as in the NEWAYS schedule reports:
+// 08:30-17:30 less the 12:15-13:30 break.
+const MINUTES_PER_DAY = 465;
 
 function buildDashboard(db) {
   const one = (sql, ...p) => db.prepare(sql).get(...p);
@@ -76,9 +76,42 @@ function buildDashboard(db) {
   });
 
   const lowStock = all('SELECT material, thickness, sheet_size, qty, min_qty FROM plates WHERE qty <= min_qty ORDER BY material, thickness');
+  // Work still open per shop process, from Job Traveller routing and Operator output.
+  const processes = all(`
+    SELECT p.id, p.name, p.seq,
+      COUNT(s.id) AS steps,
+      COALESCE(SUM(s.target_qty), 0) AS target,
+      COALESCE(SUM(o.good), 0) AS good,
+      COALESCE(SUM(o.reject), 0) AS reject,
+      COALESCE(SUM(MAX(COALESCE(s.target_qty, 0) - COALESCE(o.good, 0), 0) * COALESCE(s.cycle_min, 0)), 0) AS remaining_min
+    FROM shop_processes p
+    LEFT JOIN jt_steps s ON s.process_id = p.id
+      AND s.job_traveller_id IN (SELECT id FROM job_travellers WHERE status NOT IN ('Completed','Cancelled'))
+    LEFT JOIN (SELECT job_traveller_id, process_id, SUM(good_qty) AS good, SUM(reject_qty) AS reject
+               FROM operator_outputs GROUP BY job_traveller_id, process_id) o
+      ON o.job_traveller_id = s.job_traveller_id AND o.process_id = s.process_id
+    WHERE COALESCE(p.active, 'Yes') != 'No'
+    GROUP BY p.id ORDER BY p.seq, p.name`).map((p) => ({
+    ...p,
+    balance: Math.max(p.target - p.good, 0),
+    completion: p.target ? Math.round((p.good / p.target) * 1000) / 10 : 0,
+    yield: p.good + p.reject ? Math.round((p.good / (p.good + p.reject)) * 1000) / 10 : 100,
+    remaining_min: Math.round(p.remaining_min * 10) / 10,
+    remaining_days: Math.round((p.remaining_min / MINUTES_PER_DAY) * 100) / 100,
+  }));
+  const busiest = processes.reduce((a, p) => (p.remaining_min > (a ? a.remaining_min : 0) ? p : a), null);
+  for (const p of processes) p.bottleneck = !!busiest && p.id === busiest.id;
+  const sum = (k) => processes.reduce((n, p) => n + p[k], 0);
+  const production = {
+    target: sum('target'), good: sum('good'), reject: sum('reject'), balance: sum('balance'),
+    completion: sum('target') ? Math.round((sum('good') / sum('target')) * 1000) / 10 : 0,
+    yield: sum('good') + sum('reject') ? Math.round((sum('good') / (sum('good') + sum('reject'))) * 1000) / 10 : 100,
+    remaining_min: Math.round(sum('remaining_min') * 10) / 10,
+  };
+
   const recentNcrs = all('SELECT id, ncr_no, date, part_no, status FROM ncrs ORDER BY id DESC LIMIT 5');
 
-  return { kpi, issues, projects, workflow, load, downtime, lowStock, recentNcrs, minutesPerDay: MINUTES_PER_DAY };
+  return { kpi, production, processes, issues, projects, workflow, load, downtime, lowStock, recentNcrs, minutesPerDay: MINUTES_PER_DAY };
 }
 
 module.exports = { buildDashboard, MINUTES_PER_DAY };

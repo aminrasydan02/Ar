@@ -178,7 +178,8 @@ test('maintenance breakdowns give availability, MTBF and MTTR', async () => {
   assert.equal(d.breakdowns, 2);
   assert.equal(d.downtime_min, 180);
   assert.equal(d.mttr_min, 90);
-  assert.equal(d.availability, Math.round(((14400 - 180) / 14400) * 1000) / 10);
+  // 30 days x 465 net min = 13,950 min available.
+  assert.equal(d.availability, Math.round(((13950 - 180) / 13950) * 1000) / 10);
 });
 
 test('disabled users are signed out and admin cannot lock themselves out', async () => {
@@ -350,4 +351,19 @@ test('one Operator form records output for any process; only the operator or Adm
   assert.equal(prog.find((s) => s.process === 'Bending').good, 24 + 41);
   assert.equal((await call(planner, 'POST', '/api/job_travellers', { part_no: 'MANUAL-1', qty: 10 })).data.jt_no.startsWith('JT-'), true);
   assert.equal((await call(opS, 'POST', '/api/job_travellers', { part_no: 'X', qty: 1 })).status, 403);
+});
+
+test('NEWAYS demo Job Travellers carry the report routing; dashboard shows work per process', async () => {
+  const jt = (await call(planner, 'GET', '/api/job_travellers?part_no=606072702_PART_1')).data[0];
+  assert.equal(jt.drawing_no, '4022-472-84231-v8');
+  const steps = (await call(planner, 'GET', `/api/job_travellers/${jt.id}/progress`)).data;
+  assert.deepEqual(steps.map((s) => [s.process, s.cycle_min]), [['Laser Cutting', null], ['Polishing', 1.333], ['Bending', 2.5], ['Clinching', 2.917]]);
+  const codes = (await call(planner, 'GET', '/api/reason_codes?kind=Reject')).data;
+  assert.equal(codes.length, 5);
+  const d = (await call(admin, 'GET', '/api/dashboard')).data;
+  assert.equal(d.minutesPerDay, 465);
+  const bend = d.processes.find((p) => p.name === 'Bending');
+  assert.ok(bend.target >= 757);
+  assert.equal(d.processes.filter((p) => p.bottleneck).length, 1);
+  assert.equal(d.production.target, d.processes.reduce((n, p) => n + p.target, 0));
 });
