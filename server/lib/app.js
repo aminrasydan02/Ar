@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { resources, PROCESSES } = require('./resources');
-const { ROLES, can, rightsFor } = require('./perm');
+const { ROLES, can, rightsFor, canApprove } = require('./perm');
 const auth = require('./auth');
 const { FORMATS, MODEL_FORMATS, MIME, parseDrawingName, safeFilename, checkContent } = require('./drawings');
 const { buildDashboard } = require('./dashboard');
@@ -14,6 +14,7 @@ const VERSION = require('../../package.json').version;
 const PUBLIC_DIR = path.join(__dirname, '..', '..', 'public');
 const MAX_JSON = 1024 * 1024;
 const MAX_UPLOAD = 100 * 1024 * 1024;
+const THEMES = ['standard', 'light', 'dark', 'green', 'contrast']; // public/styles.css [data-theme]
 const STATIC_TYPES = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.png': 'image/png',
@@ -391,7 +392,7 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
       part, parent: part && part.parent_no ? withJt(db.prepare('SELECT * FROM parts WHERE part_no = ?').get(part.parent_no)) : null,
       children: db.prepare('SELECT * FROM parts WHERE parent_no = ? ORDER BY part_no').all(jt.part_no).map(withJt),
       drawings: listRecords('drawings', new URLSearchParams()).filter((d) => d.job_traveller_id === jt.id || d.part_no === jt.part_no),
-      issues: db.prepare(`SELECT id, issue_no, title, status, priority, to_process FROM issues
+      issues: db.prepare(`SELECT id, issue_no, title, status, priority, from_process, to_process, opened, due_date FROM issues
         WHERE job_traveller_id = ? OR (part_no IS NOT NULL AND part_no = ?) ORDER BY id DESC`).all(jt.id, jt.part_no),
     };
   }
@@ -519,7 +520,7 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
   // ---- users --------------------------------------------------------------
 
   function publicUser(u) {
-    return { id: u.id, username: u.username, full_name: u.full_name, role: u.role, process: u.process || null, active: !!u.active, created_at: u.created_at };
+    return { id: u.id, username: u.username, full_name: u.full_name, role: u.role, process: u.process || null, theme: u.theme || 'standard', active: !!u.active, created_at: u.created_at };
   }
 
   function checkProcess(p) {
@@ -645,6 +646,13 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
     if (parts[0] === 'me' && parts.length === 1 && method === 'GET') {
       return send(res, 200, { user, rights: rightsFor(user), version: VERSION });
     }
+    if (parts[0] === 'me' && parts[1] === 'theme' && method === 'POST') {
+      if (!user) throw new HttpError(401, 'Please sign in');
+      const { theme } = await readJson(req);
+      if (!THEMES.includes(theme)) throw new HttpError(400, `Theme must be one of: ${THEMES.join(', ')}`);
+      db.prepare('UPDATE users SET theme = ? WHERE id = ?').run(theme, user.id);
+      return send(res, 200, { theme });
+    }
     if (parts[0] === 'me' && parts[1] === 'password' && method === 'POST') {
       const b = await readJson(req);
       const row = db.prepare('SELECT * FROM users WHERE id = ?').get(user.id);
@@ -679,6 +687,15 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
     if (parts[0] === 'job_travellers' && parts[2] === 'info' && method === 'GET') {
       allow(user, 'read', 'job_travellers');
       return send(res, 200, jtInfo(Number(parts[1])));
+    }
+    if (parts[0] === 'job_travellers' && parts[2] === 'approve' && method === 'POST') {
+      if (!user) throw new HttpError(401, 'Please sign in');
+      if (!canApprove(user)) throw new HttpError(403, 'Only a Manager or Admin can approve a Job Traveller');
+      const id = Number(parts[1]);
+      getRecord('job_travellers', id);
+      db.prepare("UPDATE job_travellers SET approved_by = ?, approved_on = ?, updated_at = datetime('now') WHERE id = ?").run(user.username, localToday(), id);
+      audit(user, 'approve', 'job_travellers', id);
+      return send(res, 200, getRecord('job_travellers', id));
     }
     if (parts[0] === 'projects' && parts[1] === 'tree' && method === 'POST') {
       return send(res, 201, createProjectTree(await readJson(req), user));

@@ -5,6 +5,7 @@
 //   viewer  - read and export only
 // A user with a process (Designer, Planner, ...) may only create, update or upload the
 // data that process owns (resource.processes). Everyone can read, to share information.
+// Manager owns no shop data: reads everything, exports, approves Job Travellers, closes issues.
 const { resources } = require('./resources');
 
 const ROLES = ['admin', 'planner', 'viewer'];
@@ -45,7 +46,11 @@ function rightsFor(who) {
     }
   }
   out.users = { manage: role === 'admin' };
+  out.job_travellers.approve = canApprove(typeof who === 'string' ? { role } : who);
   return out;
 }
 
-module.exports = { ROLES, can, rightsFor };
+// Approving a Job Traveller: Manager (any role but viewer) or Admin.
+const canApprove = (u) => !!u && (u.role === 'admin' || (u.process === 'Manager' && u.role !== 'viewer'));
+
+module.exports = { ROLES, can, rightsFor, canApprove };

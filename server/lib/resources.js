@@ -7,7 +7,7 @@ const MACHINE_TYPES = ['Fiber laser', 'Press brake', 'Clinching/PEM press', 'Pol
   'Shearing', 'Turret punch', 'Welding', 'General'];
 const MATERIALS = ['Aluminium', 'SS', 'SPCC', 'SECC', 'GI', 'Copper', 'Other'];
 // The job processes in the department, in the order work flows between them.
-const PROCESSES = ['Designer', 'Planner', 'Engineer', 'Technician', 'Supervisor', 'Operator'];
+const PROCESSES = ['Designer', 'Planner', 'Engineer', 'Technician', 'Supervisor', 'Operator', 'Manager'];
 const EVERYONE = ['admin', 'planner', 'viewer'];
 
 const resources = {
@@ -218,6 +218,8 @@ const resources = {
       { name: 'qty', label: 'Required qty (pcs)', type: 'number', required: true },
       { name: 'due_date', label: 'Due date', type: 'date' },
       { name: 'status', label: 'Status', type: 'select', options: ['Planned', 'In progress', 'Completed', 'On hold', 'Cancelled'], default: 'Planned' },
+      { name: 'approved_by', label: 'Approved by', type: 'text', readonly: true },
+      { name: 'approved_on', label: 'Approved on', type: 'date', readonly: true },
       { name: 'notes', label: 'Notes', type: 'textarea', list: false },
     ],
   },

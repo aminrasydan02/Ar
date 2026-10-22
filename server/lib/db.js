@@ -66,6 +66,7 @@ function migrate(db) {
   // Version 2: each user has a job process, and issues have a discussion thread.
   const userCols = new Set(db.prepare('PRAGMA table_info(users)').all().map((c) => c.name));
   if (!userCols.has('process')) db.exec('ALTER TABLE users ADD COLUMN process TEXT');
+  if (!userCols.has('theme')) db.exec('ALTER TABLE users ADD COLUMN theme TEXT'); // colour theme chosen by the user
   db.exec(`
     CREATE TABLE IF NOT EXISTS issue_replies (
       id INTEGER PRIMARY KEY,

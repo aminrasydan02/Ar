@@ -453,3 +453,26 @@ test('no code can be saved, and uploads must be real drawing files', async () =>
   assert.equal(r.status, 201);
   assert.equal(r.data.kind, '3D model');
 });
+
+test('each process edits only its own data; Manager reads all and approves Job Travellers', async () => {
+  const mk = async (username, process) => {
+    await call(admin, 'POST', '/api/users', { username, role: 'planner', process, password: 'password123' });
+    return login(username, 'password123');
+  };
+  const tech = await mk('tech9', 'Technician');
+  const mgr = await mk('mgr9', 'Manager');
+  const r = await call(tech, 'GET', '/api/me');
+  assert.equal(r.data.rights.machines.create, true);
+  assert.equal(r.data.rights.job_travellers.create, false);
+  assert.equal((await call(tech, 'POST', '/api/job_travellers', { part_no: 'P', qty: 1 })).status, 403);
+  assert.equal((await call(tech, 'POST', '/api/machines', { code: 'M-T9', name: 'Press', machine_type: 'Press brake' })).status, 201);
+  assert.equal((await call(mgr, 'POST', '/api/machines', { code: 'M-M9', name: 'Press', machine_type: 'Press brake' })).status, 403);
+  assert.equal((await call(mgr, 'GET', '/api/machines')).status, 200);
+  assert.equal((await call(tech, 'POST', '/api/job_travellers/1/approve')).status, 403);
+  const ok = await call(mgr, 'POST', '/api/job_travellers/1/approve');
+  assert.equal(ok.status, 200);
+  assert.equal(ok.data.approved_by, 'mgr9');
+  assert.equal((await call(mgr, 'POST', '/api/me/theme', { theme: 'dark' })).status, 200);
+  assert.equal((await call(mgr, 'GET', '/api/me')).data.user.theme, 'dark');
+  assert.equal((await call(mgr, 'POST', '/api/me/theme', { theme: 'pink' })).status, 400);
+});

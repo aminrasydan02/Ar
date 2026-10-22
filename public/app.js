@@ -44,7 +44,7 @@ const STATUS_CLASS = {
   'Completed': 'ok', 'Done': 'ok', 'Closed': 'ok', 'Running': 'ok', 'Current': 'ok', 'Good': 'ok',
   'In progress': 'warn', 'Open': 'warn', 'Maintenance': 'warn', 'Worn': 'warn', 'On hold': 'warn', 'Idle': 'info', 'Planned': 'info',
   'Down': 'bad', 'Damaged': 'bad', 'Cancelled': 'bad', 'Superseded': '', 'Scrapped': 'bad', 'Breakdown': 'bad',
-  'Blocked': 'bad', 'Resolved': 'ok', 'Urgent': 'bad', 'High': 'warn',
+  'Blocked': 'bad', 'Resolved': 'ok', 'Urgent': 'bad', 'High': 'warn', 'Pending': '', '3D model': 'info', 'Drawing': '', 'Image': '',
 };
 const pill = (v) => h('span', { class: `pill ${STATUS_CLASS[v] ?? ''}` }, v);
 // Numbers with thousands separators and at most 2 decimals; dates as DD/MM/YYYY.
@@ -642,33 +642,145 @@ function importDialog(onDone, projectId) {
   ]);
 }
 
+const infoRow = (pairs) => h('div', { class: 'kpis' }, pairs.map(([l, v]) => h('div', {}, h('div', { class: 'muted' }, l), h('div', {}, v || '—'))));
+const jtLink = (p) => (p.jt ? h('a', { href: `#/jt/${p.jt.id}` }, p.jt.jt_no) : h('span', { class: 'muted' }, 'No Job Traveller'));
+
 async function viewJobTraveller(id) {
-  const [jt, steps] = await Promise.all([api('GET', `/api/job_travellers/${id}`), api('GET', `/api/job_travellers/${id}/progress`)]);
+  const { jt, steps, current, part, parent, children, drawings, issues } = await api('GET', `/api/job_travellers/${id}/info`);
   const reload = () => route();
+  const drawingBox = h('div');
+  const showDrawings = (rows) => drawingBox.replaceChildren(
+    right('drawings', 'upload') ? uploadBox(reload, { job_traveller_id: jt.id, part_no: jt.part_no }) : null,
+    rows.length ? h('div', { class: 'table-wrap' }, h('table', {},
+      h('thead', {}, h('tr', {}, ['Type', 'Part number', 'Rev', 'Format', 'Status', 'File', 'By', ''].map((t) => h('th', {}, t)))),
+      h('tbody', {}, rows.map((d) => h('tr', {}, h('td', {}, pill(d.kind || 'Drawing')), h('td', {}, d.part_no), h('td', {}, d.rev || ''),
+        h('td', {}, d.format.toUpperCase()), h('td', {}, pill(d.status)), h('td', {}, d.filename), h('td', {}, d.uploaded_by || ''), h('td', {}, drawingActions(d))))))) :
+      h('div', { class: 'panel muted' }, 'No drawings or STEP files yet.'));
+  showDrawings(drawings);
   return [
     h('div', { class: 'toolbar' }, h('h1', { class: 'grow' }, `${jt.jt_no} — ${jt.part_no}`),
       h('a', { class: 'btn', href: `#/operator?jt=${jt.id}` }, 'Record output'),
       h('a', { class: 'btn', href: `#/jt/${jt.id}/print` }, 'Print / PDF'),
+      right('job_travellers', 'approve') && !jt.approved_by ? h('button', { class: 'btn primary', onclick: async () => {
+        try { await api('POST', `/api/job_travellers/${jt.id}/approve`); toast(`${jt.jt_no} approved`); reload(); } catch (e) { toast(e.message, true); }
+      } }, 'Approve') : null,
       h('button', { class: 'btn', onclick: () => editRecord('job_travellers', jt, null, reload) }, right('job_travellers', 'update') ? 'Edit' : 'Details')),
-    h('div', { class: 'panel' }, h('div', { class: 'kpis' },
-      [['Project', jt.project_id__label], ['Customer', jt.customer], ['Drawing', jt.drawing_no], ['Material', [jt.material, jt.thickness && `${jt.thickness} mm`].filter(Boolean).join(' ')],
-        ['Qty', fmtNum(jt.qty)], ['Due', fmtDate(jt.due_date)]].map(([l, v]) => h('div', {}, h('div', { class: 'muted' }, l), h('div', {}, v || '—'))),
-      h('div', {}, h('div', { class: 'muted' }, 'Status'), pill(jt.status)))),
-    h('h2', {}, 'Routing and progress'),
+    h('div', { class: `now ${current === 'Completed' ? 'done' : ''}` }, h('span', { class: 'muted' }, 'Now at'),
+      h('strong', {}, current || 'No routing yet'), pill(jt.status),
+      jt.approved_by ? h('span', { class: 'pill ok' }, `Approved by ${jt.approved_by} ${fmtDate(jt.approved_on)}`) : h('span', { class: 'pill' }, 'Not approved yet')),
+    h('div', { class: 'panel' }, infoRow([['Project', jt.project_id__label], ['Customer', jt.customer], ['Description', jt.description], ['Drawing', jt.drawing_no],
+      ['Material', [jt.material, jt.thickness && `${fmtNum(jt.thickness)} mm`].filter(Boolean).join(' ')], ['Qty (pcs)', fmtNum(jt.qty)], ['Due', fmtDate(jt.due_date)]])),
+    h('h2', {}, 'Stage progress'),
     steps.length ? h('div', { class: 'table-wrap' }, h('table', {},
-      h('thead', {}, h('tr', {}, ['Seq', 'Process', 'Cycle (min)', 'Target', 'Good', 'Reject', 'Balance', 'Progress'].map((t) => h('th', {}, t)))),
-      h('tbody', {}, steps.map((s) => {
-        const pct = s.target_qty ? Math.min(100, Math.round((s.good / s.target_qty) * 100)) : 0;
+      h('thead', {}, h('tr', {}, ['Seq', 'Process', 'Stage', 'Cycle (min)', 'Target', 'Good', 'Reject', 'Balance', 'Progress'].map((t) => h('th', {}, t)))),
+      h('tbody', {}, steps.map((st) => {
+        const pct = st.target_qty ? Math.min(100, Math.round((st.good / st.target_qty) * 100)) : 0;
         const bar = h('div'); bar.style.width = `${pct}%`;
-        return h('tr', {}, h('td', { class: 'num' }, s.seq ?? ''), h('td', {}, s.process), h('td', { class: 'num' }, fmtNum(s.cycle_min)),
-          h('td', { class: 'num' }, fmtNum(s.target_qty)), h('td', { class: 'num' }, fmtNum(s.good)), h('td', { class: 'num' }, fmtNum(s.reject)),
-          h('td', { class: 'num' }, s.target_qty != null ? fmtNum(Math.max(0, s.target_qty - s.good)) : ''),
+        return h('tr', { class: st.process === current ? 'here' : null }, h('td', { class: 'num' }, st.seq ?? ''), h('td', {}, st.process), h('td', {}, pill(st.state)),
+          h('td', { class: 'num' }, fmtNum(st.cycle_min)), h('td', { class: 'num' }, fmtNum(st.target_qty)), h('td', { class: 'num' }, fmtNum(st.good)),
+          h('td', { class: 'num' }, fmtNum(st.reject)), h('td', { class: 'num' }, st.target_qty != null ? fmtNum(Math.max(0, st.target_qty - st.good)) : ''),
           h('td', {}, h('div', { class: 'bar' }, bar), ` ${pct}%`));
       })))) : h('div', { class: 'panel muted' }, 'No process steps yet.'),
+    h('h2', {}, 'Mother and child parts'),
+    part ? h('div', { class: 'table-wrap' }, h('table', {},
+      h('thead', {}, h('tr', {}, ['Level', 'Part number', 'Description', 'Qty / set', 'Job Traveller'].map((t) => h('th', {}, t)))),
+      h('tbody', {},
+        parent ? h('tr', {}, h('td', {}, 'Mother'), h('td', {}, parent.part_no), h('td', {}, parent.description || ''), h('td', { class: 'num' }, fmtNum(parent.qty_per_set)), h('td', {}, jtLink(parent))) : null,
+        h('tr', { class: 'here' }, h('td', {}, 'This part'), h('td', {}, part.part_no), h('td', {}, part.description || ''), h('td', { class: 'num' }, fmtNum(part.qty_per_set)), h('td', {}, jt.jt_no)),
+        children.map((c) => h('tr', {}, h('td', {}, '↳ Child'), h('td', {}, c.part_no), h('td', {}, c.description || ''), h('td', { class: 'num' }, fmtNum(c.qty_per_set)), h('td', {}, jtLink(c)))))))
+      : h('div', { class: 'panel muted' }, 'This part is not in a project parts list.'),
+    h('h2', {}, 'Drawings and STEP files'), drawingBox,
+    h('div', { class: 'toolbar gap-top' }, h('h2', { class: 'grow' }, 'Issues'),
+      right('issues', 'create') ? h('button', { class: 'btn', onclick: () => editRecord('issues', null, { job_traveller_id: jt.id, part_no: jt.part_no, project_id: jt.project_id, ...userPreset('issues') }, reload) }, '+ Raise issue') : null),
+    issues.length ? issueTable(issues) : h('div', { class: 'panel muted' }, 'No issues for this item.'),
     h('h2', {}, 'Steps'),
     h('p', { class: 'muted' }, 'Seq sets the order of the processes. Add a step for each process this part goes through.'),
     recordTable('jt_steps', { filter: { job_traveller_id: jt.id }, columns: ['seq', 'process_id', 'cycle_min', 'target_qty', 'details'] }),
   ];
+}
+
+// Search by Job Traveller no. (or part / drawing no.). One match opens it straight away.
+async function viewFind() {
+  const q = (new URLSearchParams(location.hash.split('?')[1] || '').get('q') || '').trim();
+  if (!q) return [h('h1', {}, 'Find Job Traveller'), h('p', { class: 'muted' }, 'Type a Job Traveller no., part no. or drawing no. in the search box at the top.')];
+  const rows = await api('GET', `/api/job_travellers?q=${encodeURIComponent(q)}`);
+  const exact = rows.find((r) => r.jt_no.toUpperCase() === q.toUpperCase());
+  if (exact || rows.length === 1) { location.replace(`#/jt/${(exact || rows[0]).id}`); return []; }
+  return [h('h1', {}, `Search: ${q}`),
+    rows.length ? h('div', { class: 'table-wrap' }, h('table', {},
+      h('thead', {}, h('tr', {}, ['Job Traveller', 'Part number', 'Drawing', 'Qty', 'Due', 'Status'].map((t) => h('th', {}, t)))),
+      h('tbody', {}, rows.map((r) => h('tr', { class: 'click', onclick: () => { location.hash = `#/jt/${r.id}`; } },
+        h('td', {}, r.jt_no), h('td', {}, r.part_no), h('td', {}, r.drawing_no || ''), h('td', { class: 'num' }, fmtNum(r.qty)), h('td', {}, fmtDate(r.due_date)), h('td', {}, pill(r.status)))))))
+      : h('div', { class: 'panel muted' }, 'Nothing found.')];
+}
+
+// New project: mother part with child parts (any depth). Qty per parent is multiplied down the tree.
+async function viewProjectNew() {
+  const procs = await processList();
+  const MATS = state.meta.resources.parts.fields.find((f) => f.name === 'material').options;
+  let n = 0;
+  const rows = h('tbody');
+  const field = (name, attrs) => h('input', { name, ...attrs });
+  function addRow(parentRow) {
+    const key = String(++n);
+    const depth = parentRow ? Number(parentRow.dataset.depth) + 1 : 0;
+    const tr = h('tr', { 'data-key': key, 'data-parent': parentRow ? parentRow.dataset.key : '', 'data-depth': depth },
+      h('td', {}, h('span', { class: `lvl lvl${Math.min(depth, 4)}` }, depth ? `${'↳'.padStart(depth, ' ')} Child` : 'Mother'), field('part_no', { required: true, placeholder: 'Part number' })),
+      h('td', {}, field('description', { placeholder: 'Description' })),
+      h('td', {}, h('select', { name: 'material' }, h('option', { value: '' }, '—'), MATS.map((m) => h('option', {}, m)))),
+      h('td', {}, field('thickness', { type: 'number', step: 'any', min: 0, class: 'narrow' })),
+      h('td', {}, field('qty_per_parent', { type: 'number', min: 1, step: 'any', value: 1, class: 'narrow', disabled: !parentRow })),
+      h('td', { class: 'procs' }, procs.map((p) => h('label', { class: 'chk' }, h('input', { type: 'checkbox', name: 'proc', value: p.id }), p.name))),
+      h('td', {}, h('button', { class: 'btn small', type: 'button', onclick: () => addRow(tr) }, '+ Child'), ' ',
+        h('button', { class: 'btn small danger', type: 'button', onclick: () => {
+          const drop = new Set([tr.dataset.key]);
+          [...rows.children].forEach((r) => { if (drop.has(r.dataset.parent)) drop.add(r.dataset.key); });
+          [...rows.children].filter((r) => drop.has(r.dataset.key)).forEach((r) => r.remove());
+        } }, 'Remove')));
+    // A child goes after the last row in its parent's branch.
+    let after = parentRow;
+    if (parentRow) {
+      const branch = new Set([parentRow.dataset.key]);
+      for (const r of [...rows.children].slice([...rows.children].indexOf(parentRow) + 1)) {
+        if (!branch.has(r.dataset.parent)) break;
+        branch.add(r.dataset.key); after = r;
+      }
+      after.after(tr);
+    } else rows.append(tr);
+    tr.querySelector('input').focus();
+  }
+  const msg = h('div');
+  const f = h('form', { class: 'panel form' },
+    h('div', {}, h('label', {}, 'Project code *'), h('input', { name: 'code', required: true })),
+    h('div', {}, h('label', {}, 'Project name *'), h('input', { name: 'name', required: true })),
+    h('div', {}, h('label', {}, 'Customer'), h('input', { name: 'customer' })),
+    h('div', {}, h('label', {}, 'Work order'), h('input', { name: 'work_order' })),
+    h('div', {}, h('label', {}, 'Due date'), h('input', { name: 'due_date', type: 'date' })),
+    h('div', {}, h('label', {}, 'Sets to make'), h('input', { name: 'sets', type: 'number', min: 1, value: 1 })),
+    h('div', { class: 'full' }, h('label', { class: 'chk' }, h('input', { type: 'checkbox', name: 'create_jts', checked: true }), 'Create a Job Traveller for every part (qty = qty per set × sets), with the ticked processes as its routing')));
+  const save = h('button', { class: 'btn primary', type: 'button', onclick: async () => {
+    const e = f.elements;
+    const parts = [...rows.children].map((r) => {
+      const v = (name) => r.querySelector(`[name="${name}"]`).value.trim();
+      return { key: r.dataset.key, parent_key: r.dataset.parent || null, part_no: v('part_no'), description: v('description'), material: v('material'),
+        thickness: v('thickness'), qty_per_parent: r.dataset.parent ? Number(v('qty_per_parent')) || 1 : 1,
+        process_ids: [...r.querySelectorAll('[name="proc"]:checked')].map((c) => Number(c.value)) };
+    });
+    try {
+      const r = await api('POST', '/api/projects/tree', { sets: Number(e.sets.value) || 1, create_jts: e.create_jts.checked, parts,
+        project: { code: e.code.value, name: e.name.value, customer: e.customer.value, work_order: e.work_order.value, due_date: e.due_date.value } });
+      toast(`Project ${r.project.code} saved with ${r.parts.length} parts`);
+      location.hash = `#/project/${r.project.id}`;
+    } catch (err) { msg.replaceChildren(h('div', { class: 'msg err' }, err.message)); }
+  } }, 'Save project');
+  addRow(null);
+  return [h('h1', {}, 'New project'),
+    h('p', { class: 'muted' }, 'Enter the mother part (assembly), then add its child parts. A child can have its own children. Qty per parent is how many of this part go into one of its parent.'),
+    f, h('h2', {}, 'Mother and child parts'),
+    h('div', { class: 'table-wrap' }, h('table', { class: 'tree-form' },
+      h('thead', {}, h('tr', {}, ['Part', 'Description', 'Material', 'Thk (mm)', 'Qty / parent', 'Processes', ''].map((t) => h('th', {}, t)))), rows)),
+    h('div', { class: 'toolbar gap-top' }, h('button', { class: 'btn', type: 'button', onclick: () => addRow(null) }, '+ Another mother part'), h('span', { class: 'grow' }), save),
+    msg];
 }
 
 // A4 Job Traveller that goes with the parts through the shop.
@@ -880,7 +992,31 @@ function viewAccount() {
   return [h('h1', {}, 'My account'),
     h('p', {}, `Signed in as ${state.user.username}`, h('span', { class: 'role' }, state.user.role),
       state.user.process ? h('span', { class: 'role' }, state.user.process) : null),
-    msg, f];
+    h('h2', {}, 'Colour theme'), themePicker(),
+    h('h2', {}, 'Password'), msg, f];
+}
+
+// Colour themes (public/styles.css [data-theme]). Saved per user, so it follows them to any PC.
+const THEMES = [
+  ['standard', 'Standard', 'Navy and amber. The default for office and shop floor.', ['#1f3a5f', '#2c5282', '#f0a43a', '#f4f6f9']],
+  ['light', 'Light', 'Soft grey and blue. Calm for long hours at a desk.', ['#eef1f4', '#0a5cad', '#d97706', '#ffffff']],
+  ['dark', 'Dark', 'Low glare for night shift and bright screens.', ['#0f1317', '#2f6fb8', '#e8a948', '#1c2228']],
+  ['green', 'Soft green', 'Green tones that are easy on the eyes.', ['#1e4d3a', '#24604a', '#e0a43a', '#f2f5f1']],
+  ['contrast', 'High contrast', 'Black and white with thick lines. Easiest to read from a distance.', ['#000000', '#00307a', '#ffcc00', '#ffffff']],
+];
+function applyTheme(t) { document.documentElement.dataset.theme = t || 'standard'; }
+
+function themePicker() {
+  const wrap = h('div', { class: 'themes' });
+  const draw = () => wrap.replaceChildren(...THEMES.map(([id, name, note, colours]) => {
+    const sw = h('div', { class: 'swatches' }, colours.map((c) => { const x = h('span'); x.style.background = c; return x; }));
+    return h('button', { type: 'button', class: `theme-card${state.user.theme === id ? ' on' : ''}`, onclick: async () => {
+      try { await api('POST', '/api/me/theme', { theme: id }); state.user.theme = id; applyTheme(id); draw(); toast(`Theme: ${name}`); }
+      catch (e) { toast(e.message, true); }
+    } }, h('strong', {}, name), sw, h('div', { class: 'muted' }, note));
+  }));
+  draw();
+  return wrap;
 }
 
 // ---------- shell and routing ------------------------------------------------
@@ -914,6 +1050,7 @@ function renderShell() {
   groups.Engineering = [['#/drawings', 'Drawings'], ...(groups.Engineering || [])];
   const daily = [['#/daily', 'Daily board'], ...(groups['Daily work'] || [])];
   groups.Production = [['#/operator', 'Operator form'], ...(groups.Production || [])];
+  if (right('projects', 'create')) groups.Planning = [['#/project-new', 'New project (parts)'], ...(groups.Planning || [])];
   delete groups['Daily work'];
   const nav = h('nav', { class: 'side', id: 'side' },
     h('div', { class: 'brand' }, h('img', { src: 'icon.svg', alt: '' }), h('div', {}, 'Sheet Metal Manager', h('div', { class: 'brand-sub' }, state.meta.company))),
@@ -921,8 +1058,14 @@ function renderShell() {
     Object.entries({ 'Daily work': daily, ...groups }).map(([g, links]) => [h('h4', {}, g), links.map(([href, label]) => h('a', { href }, label))]),
     state.user.role === 'admin' ? [h('h4', {}, 'Admin'), h('a', { href: '#/users' }, 'Users'), h('a', { href: '#/audit' }, 'Activity log')] : null,
     h('h4', {}, 'Account'), h('a', { href: '#/account' }, 'My account'));
+  const search = h('form', { class: 'find', role: 'search', onsubmit: (e) => {
+    e.preventDefault();
+    const q = search.elements.q.value.trim();
+    if (q) location.hash = `#/find?q=${encodeURIComponent(q)}`;
+  } }, h('input', { name: 'q', type: 'search', placeholder: 'Job Traveller no. e.g. JT-2026-0001', 'aria-label': 'Find Job Traveller' }), h('button', { class: 'btn', type: 'submit' }, 'Find'));
   const top = h('div', { class: 'top' },
     h('button', { class: 'btn menu-btn', onclick: () => nav.classList.toggle('open') }, '☰'),
+    search,
     h('span', { class: 'who' }, state.user.full_name || state.user.username, h('span', { class: 'role' }, state.user.role),
       state.user.process ? h('span', { class: 'role' }, state.user.process) : null),
     h('span', {}, h('span', { class: 'muted' }, `v${state.version} `),
@@ -947,6 +1090,8 @@ async function route() {
     else if (a === 'jt' && c === 'print') view = await viewJobTravellerPrint(Number(b));
     else if (a === 'jt') view = await viewJobTraveller(Number(b));
     else if (a === 'operator') view = await viewOperator();
+    else if (a === 'find') view = await viewFind();
+    else if (a === 'project-new') view = await viewProjectNew();
     else if (a === 'project') view = await viewProject(Number(b));
     else if (a === 'ncr' && c === 'print') view = await viewNcrPrint(Number(b));
     else if (a === 'users') view = await viewUsers();
@@ -963,6 +1108,7 @@ async function route() {
 async function start() {
   const [me, meta] = await Promise.all([api('GET', '/api/me'), api('GET', '/api/meta')]);
   Object.assign(state, { user: me.user, rights: me.rights, version: me.version, meta });
+  applyTheme(me.user.theme);
   renderShell();
   await route();
 }
