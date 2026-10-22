@@ -110,6 +110,20 @@ during a quiet period.
 - **Export CSV** on every list (opens in Excel).
 - **Publish** through Cloudflare Tunnel: see `deploy/cloudflare/README.md`.
 
+## Preview with the department's data
+
+```
+node tools/preview/load.js /tmp/smm-preview <neways-reports-dir> <maintenance-bom-dir>
+node tools/preview/build.js /tmp/smm-preview preview.html
+```
+
+`load.js` fills a new database through the website's own API: NEWAYS schedule reports and
+master dashboard (Job Travellers, one step per part and process, duplicates merged),
+maintenance checklists (PM checklist and work order log per machine), the Sheetmetal BOM
+(a project with its mother and child parts) and a shop-floor layout. It writes
+`data-check.md` listing what was merged and what needs checking. `build.js` turns it into
+one read-only HTML page.
+
 ## Development
 
 ```

@@ -57,6 +57,14 @@ const resources = {
       { name: 'qty_per_set', label: 'Qty / set', type: 'number', default: 1 },
       { name: 'sets', label: 'Sets', type: 'number', default: 1 },
       { name: 'job_sheet', label: 'Job sheet', type: 'text' },
+      // BOM details (Sheetmetal BOM template)
+      { name: 'category', label: 'Category', type: 'select', options: ['Sheet Metal', 'Hardware', 'Accessory', 'Assembly'] },
+      { name: 'make_buy', label: 'Make / Buy', type: 'select', options: ['Make', 'Buy'] },
+      { name: 'drawing_no', label: 'Drawing no.', type: 'text', list: false },
+      { name: 'flat_size', label: 'Flat pattern (mm)', type: 'text', list: false },
+      { name: 'process_flow', label: 'Process workflow', type: 'text', list: false },
+      { name: 'finish', label: 'Finishing / coating', type: 'text', list: false },
+      { name: 'hardware', label: 'Hardware / fasteners', type: 'text', list: false },
     ],
   },
   routings: {
@@ -172,6 +180,24 @@ const resources = {
       { name: 'pic', label: 'PIC', type: 'text' },
       { name: 'status', label: 'Status', type: 'select', options: ['Open', 'In progress', 'Closed'], default: 'Open' },
       { name: 'details', label: 'Details', type: 'textarea', list: false },
+    ],
+  },
+  pm_tasks: {
+    label: 'PM checklist', singular: 'PM task', group: 'Engineering',
+    // Preventive maintenance checklist per machine (Laser, Press Brake, Clinching templates).
+    write: ['admin'],
+    display: 'task',
+    fields: [
+      { name: 'machine_id', label: 'Machine', type: 'ref', ref: 'machines', required: true },
+      { name: 'frequency', label: 'Frequency', type: 'select', options: ['Daily', 'Weekly', 'Monthly', 'Quarterly', 'Semi-Annual', 'Annual'], required: true },
+      { name: 'item_no', label: 'Item no.', type: 'text' },
+      { name: 'task', label: 'Maintenance item', type: 'text', required: true },
+      { name: 'procedure', label: 'Inspection point / procedure', type: 'textarea', list: false },
+      { name: 'standard', label: 'Standard / spec', type: 'text', list: false },
+      { name: 'status', label: 'Status', type: 'select', options: ['Pending', 'Pass', 'Fail', 'N/A'], default: 'Pending' },
+      { name: 'checked_on', label: 'Date checked', type: 'date' },
+      { name: 'checked_by', label: 'Checked by', type: 'text' },
+      { name: 'remarks', label: 'Remarks', type: 'text', list: false },
     ],
   },
   ncrs: {
@@ -356,6 +382,7 @@ const OWNERS = {
   job_travellers: ['Planner', 'Supervisor'], jt_steps: ['Planner', 'Engineer'],
   operator_outputs: ['Operator', 'Supervisor'],
   inventory_items: ['Technician', 'Supervisor'],
+  pm_tasks: ['Technician', 'Supervisor'],
 };
 for (const [name, list] of Object.entries(OWNERS)) resources[name].processes = list;
 

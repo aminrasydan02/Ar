@@ -75,11 +75,13 @@ function migrate(db) {
   if (!auditCols.has('after')) db.exec('ALTER TABLE audit ADD COLUMN after TEXT');
   // Which process may change which module. Admin changes it on the Access rights page.
   db.exec('CREATE TABLE IF NOT EXISTS process_rights (process TEXT NOT NULL, resource TEXT NOT NULL, PRIMARY KEY (process, resource))');
-  if (!db.prepare("SELECT 1 FROM meta WHERE key = 'process_rights_seeded'").get()) {
-    const ins = db.prepare('INSERT OR IGNORE INTO process_rights (process, resource) VALUES (?, ?)');
-    for (const [name, res] of Object.entries(resources)) for (const p of res.processes || []) ins.run(p, name);
-    db.prepare("INSERT INTO meta (key, value) VALUES ('process_rights_seeded', '1')").run();
+  // Default rights for each module the first time it appears; after that Admin's choice is kept.
+  const seen = new Set(String((db.prepare("SELECT value FROM meta WHERE key = 'process_rights_modules'").get() || {}).value || '').split(',').filter(Boolean));
+  const ins = db.prepare('INSERT OR IGNORE INTO process_rights (process, resource) VALUES (?, ?)');
+  for (const [name, res] of Object.entries(resources)) {
+    if (!seen.has(name)) { for (const p of res.processes || []) ins.run(p, name); seen.add(name); }
   }
+  db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('process_rights_modules', ?)").run([...seen].join(','));
   db.exec(`
     CREATE TABLE IF NOT EXISTS issue_replies (
       id INTEGER PRIMARY KEY,

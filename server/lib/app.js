@@ -513,13 +513,14 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
         const data = { project_id: project.id, part_no: raw.part_no, parent_no: parent ? parent.part_no : null,
           description: raw.description, material: raw.material, thickness: raw.thickness,
           qty_per_set: qtyPer * (parent ? parent.qty_per_set : 1), sets };
+        for (const k of ['category', 'make_buy', 'drawing_no', 'flat_size', 'process_flow', 'finish', 'hardware']) if (raw[k]) data[k] = raw[k];
         let part;
         try { part = createRecord('parts', clean('parts', data, { partial: false }), user); } catch (err) { throw new HttpError(err.status || 400, `Line ${i + 1}: ${err.message}`); }
         byKey.set(String(raw.key ?? i), part);
         let jt = null;
-        if (b.create_jts) {
+        if (b.create_jts && raw.make_buy !== 'Buy') { // bought parts need no Job Traveller
           jt = createRecord('job_travellers', clean('job_travellers', { project_id: project.id, customer: project.customer, part_no: part.part_no,
-            description: part.description, material: part.material, thickness: part.thickness, qty: part.qty_per_set * sets, due_date: project.due_date }, { partial: false }), user);
+            description: part.description, drawing_no: part.drawing_no, material: part.material, thickness: part.thickness, qty: part.qty_per_set * sets, due_date: project.due_date }, { partial: false }), user);
           const procs = (Array.isArray(raw.process_ids) ? raw.process_ids : []).map(Number)
             .map((pid) => db.prepare('SELECT id, seq FROM shop_processes WHERE id = ?').get(pid)).filter(Boolean);
           for (const pr of procs) {

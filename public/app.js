@@ -44,7 +44,7 @@ const STATUS_CLASS = {
   'Completed': 'ok', 'Done': 'ok', 'Closed': 'ok', 'Running': 'ok', 'Current': 'ok', 'Good': 'ok',
   'In progress': 'warn', 'Open': 'warn', 'Maintenance': 'warn', 'Worn': 'warn', 'On hold': 'warn', 'Idle': 'info', 'Planned': 'info',
   'Down': 'bad', 'Damaged': 'bad', 'Cancelled': 'bad', 'Superseded': '', 'Scrapped': 'bad', 'Breakdown': 'bad',
-  'Blocked': 'bad', 'Resolved': 'ok', 'Urgent': 'bad', 'High': 'warn', 'Pending': '', '3D model': 'info', 'OK': 'ok', 'Low': 'warn', 'Out': 'bad', 'Drawing': '', 'Image': '',
+  'Blocked': 'bad', 'Resolved': 'ok', 'Urgent': 'bad', 'High': 'warn', 'Pending': '', '3D model': 'info', 'OK': 'ok', 'Low': 'warn', 'Out': 'bad', 'Pass': 'ok', 'Fail': 'bad', 'Make': 'info', 'Buy': '', 'Drawing': '', 'Image': '',
 };
 const pill = (v) => h('span', { class: `pill ${STATUS_CLASS[v] ?? ''}` }, v);
 // Numbers with thousands separators and at most 2 decimals; dates as DD/MM/YYYY.
