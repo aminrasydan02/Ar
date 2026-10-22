@@ -118,9 +118,28 @@ function buildDashboard(db) {
     remaining_min: Math.round(sum('remaining_min') * 10) / 10,
   };
 
+  // Progress of each open project per shop process (Job Traveller routing vs Operator output).
+  const perProc = all(`
+    SELECT j.project_id, p.id AS process_id, p.name, p.seq,
+      COALESCE(SUM(s.target_qty), 0) AS target, COALESCE(SUM(MIN(COALESCE(o.good, 0), COALESCE(s.target_qty, 0))), 0) AS good
+    FROM jt_steps s JOIN job_travellers j ON j.id = s.job_traveller_id AND j.status != 'Cancelled'
+    JOIN shop_processes p ON p.id = s.process_id
+    LEFT JOIN (SELECT job_traveller_id, process_id, SUM(good_qty) AS good FROM operator_outputs GROUP BY job_traveller_id, process_id) o
+      ON o.job_traveller_id = s.job_traveller_id AND o.process_id = s.process_id
+    WHERE j.project_id IS NOT NULL GROUP BY j.project_id, p.id ORDER BY p.seq`);
+  const jtCounts = all(`SELECT project_id, status, COUNT(*) AS n FROM job_travellers WHERE project_id IS NOT NULL GROUP BY project_id, status`);
+  const pct = (g, t) => (t ? Math.round((g / t) * 1000) / 10 : 0);
+  const projectProgress = all(`SELECT id, code, name, customer, start_date, due_date, status FROM projects
+    WHERE status NOT IN ('Cancelled') ORDER BY status = 'Completed', due_date IS NULL, due_date`).map((p) => {
+    const procs = perProc.filter((x) => x.project_id === p.id).map((x) => ({ name: x.name, target: x.target, good: x.good, completion: pct(x.good, x.target) }));
+    const target = procs.reduce((n, x) => n + x.target, 0), good = procs.reduce((n, x) => n + x.good, 0);
+    const jts = Object.fromEntries(jtCounts.filter((c) => c.project_id === p.id).map((c) => [c.status, c.n]));
+    return { ...p, target, good, completion: pct(good, target), processes: procs, job_travellers: jts };
+  });
+
   const recentNcrs = all('SELECT id, ncr_no, date, part_no, status FROM ncrs ORDER BY id DESC LIMIT 5');
 
-  return { kpi, production, processes, issues, projects, workflow, load, downtime, lowStock, plates, lowItems, recentNcrs, minutesPerDay: MINUTES_PER_DAY };
+  return { kpi, production, processes, issues, projects, workflow, load, downtime, lowStock, plates, projectProgress, lowItems, recentNcrs, minutesPerDay: MINUTES_PER_DAY };
 }
 
 module.exports = { buildDashboard, MINUTES_PER_DAY };

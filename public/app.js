@@ -378,6 +378,56 @@ function viewSwitch() {
     [['cockpit', 'Cockpit'], ['classic', 'Classic']].map(([m, l]) => h('button', { type: 'button', class: mode === m ? 'on' : '', 'aria-pressed': String(mode === m), onclick: () => pick(m) }, l)));
 }
 
+// Project progress chart: bubbles pick a project; "All" compares projects, one project shows each process.
+function projectProgressCard(list, cardClass) {
+  const card = h('section', { class: cardClass });
+  let pick = '';
+  try { pick = localStorage.getItem('smm-dash-proj') || ''; } catch (e) { /* storage blocked */ }
+  projCache = list;
+  function draw() {
+    const p = list.find((x) => x.code === pick);
+    if (!p) pick = '';
+    const set = (code) => () => { pick = pick === code ? '' : code; try { localStorage.setItem('smm-dash-proj', pick); } catch (e) { /* storage blocked */ } draw(); };
+    const bubbles = h('div', { class: 'pbubs' },
+      h('button', { type: 'button', class: `chip${!pick ? ' on' : ''}`, 'aria-pressed': String(!pick), onclick: set('') }, 'All projects', h('span', { class: 'n' }, list.length)),
+      list.map((x) => projectBubble(x.code, fmtPct(x.completion), pick === x.code, set(x.code))));
+    let chart;
+    if (!p) {
+      chart = list.length ? h('div', { class: 'hbars', role: 'list' }, list.map((x) => {
+        const fill = h('div', { class: 'hbar-f' }); fill.style.width = `${Math.min(100, x.completion)}%`; fill.style.background = projectColour(x.code);
+        const left = x.due_date ? daysBetweenIso(localToday(), x.due_date) : null;
+        return h('button', { type: 'button', class: 'hbar', role: 'listitem', onclick: set(x.code), 'aria-label': `${x.code} ${fmtPct(x.completion)}` },
+          h('div', { class: 'hbar-l' }, dot(projectColour(x.code)), h('strong', {}, x.code), h('small', {}, x.name)),
+          h('div', { class: 'hbar-t' }, fill),
+          h('div', { class: 'hbar-v' }, h('strong', {}, fmtPct(x.completion)), h('small', {}, `${fmtNum(x.good)}/${fmtNum(x.target)} pcs${left !== null ? ` · ${left >= 0 ? `${left}d left` : `${-left}d late`}` : ''}`)));
+      })) : h('div', { class: 'empty' }, 'No projects yet.');
+    } else {
+      const cols = p.processes.length ? h('div', { class: 'vchart', role: 'img', 'aria-label': p.processes.map((x) => `${x.name} ${fmtPct(x.completion)}`).join(', ') },
+        h('div', { class: 'vgrid', 'aria-hidden': 'true' }, ['100%', '75%', '50%', '25%', '0%'].map((t) => h('span', {}, t))),
+        h('div', { class: 'vcols' }, p.processes.map((x) => {
+          const bar = h('div', { class: 'vbar' }); bar.style.height = `${Math.min(100, x.completion)}%`; bar.style.background = projectColour(p.code);
+          return h('div', { class: 'vcol' }, h('div', { class: 'vval' }, fmtPct(x.completion)), h('div', { class: 'vtrack' }, bar),
+            h('div', { class: 'vlab' }, h('strong', {}, x.name), h('small', {}, `${fmtNum(x.good)}/${fmtNum(x.target)}`)));
+        }))) : h('div', { class: 'empty' }, 'No Job Traveller routing for this project yet.');
+      const jt = Object.entries(p.job_travellers || {});
+      chart = [projectPanel(p.code, Object.values(p.job_travellers || {}).reduce((a, b) => a + b, 0)),
+        h('div', { class: 'pstats' },
+          h('div', {}, h('small', {}, 'Overall'), h('strong', {}, fmtPct(p.completion))),
+          h('div', {}, h('small', {}, 'Good / target'), h('strong', {}, `${fmtNum(p.good)} / ${fmtNum(p.target)} pcs`)),
+          h('div', {}, h('small', {}, 'Job Travellers'), h('span', {}, jt.length ? jt.map(([st, n]) => [pill(st), ` ${n} `]) : '—'))),
+        cols];
+    }
+    card.replaceChildren(
+      h('div', { class: 'dcard-h' }, h('span', { class: 'dcard-i' }, icon('folder')), h('h2', {}, p ? `Project progress · ${p.code}` : 'Project progress'),
+        h('a', { href: '#/r/job_travellers' }, 'Job Travellers')),
+      h('div', { class: 'slicer proj' }, h('span', { class: 'slicer-l' }, 'Project'), bubbles), ...[chart].flat().filter(Boolean));
+    // The panel's records label counts Job Travellers here.
+    card.querySelectorAll('.pinfo-f small').forEach((el) => { if (el.textContent === 'Records here') el.textContent = 'Job Travellers'; });
+  }
+  draw();
+  return card;
+}
+
 async function viewDashboard() {
   const d = await api('GET', '/api/dashboard');
   if (dashMode() === 'cockpit') return viewCockpit(d);
@@ -411,6 +461,7 @@ async function viewDashboard() {
       stat('chat', fmtNum(k.open_issues), 'Open issues', `${fmtNum(k.open_ncrs)} open NCR`, k.open_issues ? 'alert' : 't2'),
       stat('gear', fmtNum(k.machines_down), 'Machines down', `${fmtNum(k.open_work_orders)} open maintenance`, k.machines_down ? 'alert' : 't2')),
     h('div', { class: 'dgrid' },
+      projectProgressCard(d.projectProgress, 'dcard wide'),
       dcard('Production by process', 'pulse', processBars.length ? processBars : empty('No Job Traveller routing yet.'), ['#/r/job_travellers', 'Job Travellers'], true),
       dcard('Projects', 'folder', d.projects.length ? table(['Project', 'Due', 'Status', 'Progress'], d.projects.map((p) => {
         const pct = p.steps ? Math.round((p.steps_done / p.steps) * 100) : 0;
@@ -687,6 +738,7 @@ async function viewCockpit(d) {
       ring(pr.yield, colours[1], 'Yield', 'first pass'),
       ring(live.length ? (approved / live.length) * 100 : 0, colours[2], 'Approved', `${approved}/${live.length} JTs`),
       ring(passRate, colours[3], 'PM pass', `${checked.length} checks`))),
+    projectProgressCard(d.projectProgress, 'ck-card wide'),
     card('Machines', h('div', { class: 'ck-list' }, machines.slice(0, 8).map((m) =>
       h('div', {}, icon(machineIcon[m.status] || 'gear'), h('span', {}, m.code, ' ', pill(m.status), h('small', {}, m.name || m.machine_type || '')))))),
     card('Next to approve', nextJt ? [
