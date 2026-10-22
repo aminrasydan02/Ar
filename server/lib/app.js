@@ -38,6 +38,10 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
   // Older records get their project from the Job Traveller they belong to.
   db.exec(`UPDATE operator_outputs SET project_id = (SELECT project_id FROM job_travellers j WHERE j.id = operator_outputs.job_traveller_id) WHERE project_id IS NULL;
     UPDATE drawings SET project_id = (SELECT project_id FROM job_travellers j WHERE j.id = drawings.job_traveller_id) WHERE project_id IS NULL AND job_traveller_id IS NOT NULL;
+    INSERT INTO pm_logs (date, machine_id, pm_task_id, frequency, result, remarks, checked_by)
+      SELECT t.checked_on, t.machine_id, t.id, t.frequency, t.status, t.remarks, t.checked_by FROM pm_tasks t
+      WHERE t.checked_on IS NOT NULL AND t.status IN ('Pass','Fail','N/A')
+        AND NOT EXISTS (SELECT 1 FROM pm_logs l WHERE l.pm_task_id = t.id AND l.date = t.checked_on);
     UPDATE tooling SET machine_type = (SELECT machine_type FROM machines m WHERE m.id = tooling.machine_id) WHERE machine_type IS NULL AND machine_id IS NOT NULL;`);
 
   function send(res, status, body, headers = {}) {
@@ -217,6 +221,11 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
       const jt = db.prepare('SELECT project_id FROM job_travellers WHERE id = ?').get(v('job_traveller_id'));
       data.project_id = jt ? jt.project_id : null;
     }
+    if (name === 'pm_logs' && v('pm_task_id')) {
+      const t = db.prepare('SELECT machine_id, frequency FROM pm_tasks WHERE id = ?').get(v('pm_task_id'));
+      if (!t) throw new HttpError(400, 'PM item not found');
+      data.machine_id = t.machine_id; data.frequency = t.frequency;
+    }
     if (name === 'tooling' && !v('machine_type') && v('machine_id')) {
       const m = db.prepare('SELECT machine_type FROM machines WHERE id = ?').get(v('machine_id'));
       if (m) data.machine_type = m.machine_type;
@@ -230,6 +239,13 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
     const names = [...new Set(rows.map((r) => r.part_no))];
     db.prepare('UPDATE nestings SET part_count = ?, part_qty = ?, parts = ? WHERE id = ?')
       .run(names.length, rows.reduce((n, r) => n + r.q, 0), names.join(', '), id);
+  }
+
+  // The checklist shows the latest dated check of each PM item.
+  function syncPmTask(taskId) {
+    const last = db.prepare('SELECT date, result, checked_by FROM pm_logs WHERE pm_task_id = ? ORDER BY date DESC, id DESC LIMIT 1').get(taskId);
+    db.prepare("UPDATE pm_tasks SET status = ?, checked_on = ?, checked_by = ?, updated_at = datetime('now') WHERE id = ?")
+      .run(last ? last.result : 'Pending', last ? last.date : null, last ? last.checked_by : null, taskId);
   }
 
   function setStock(itemId, qty) {
@@ -267,6 +283,12 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
     }
     if (name === 'daily_logs') data.logged_by = user.username;
     if (name === 'operator_outputs') data.operator = user.username;
+    if (name === 'pm_logs') {
+      data.checked_by = user.username;
+      if (db.prepare('SELECT 1 FROM pm_logs WHERE pm_task_id = ? AND date = ?').get(data.pm_task_id, data.date)) {
+        throw new HttpError(409, 'This PM item is already logged for that date');
+      }
+    }
     if (name === 'job_travellers' && !data.jt_no) data.jt_no = nextNumber('job_travellers', 'jt_no', 'JT');
     linkFields(name, data);
     const cols = Object.keys(data);
@@ -277,6 +299,7 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
       if (stock) setStock(stock.item.id, (stock.item.qty_on_hand || 0) + stock.delta);
       if (name === 'inventory_items' && data.qty_on_hand > 0) logMove(id, 'Receive', data.qty_on_hand, user, 'Opening stock');
       if (name === 'nesting_parts') refreshNesting(data.nesting_id);
+      if (name === 'pm_logs') syncPmTask(data.pm_task_id);
       audit(user, 'create', name, id, null, data);
       return getRecord(name, id);
     } catch (err) { throw friendlyDbError(err); }
@@ -305,6 +328,7 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
       } catch (err) { throw friendlyDbError(err); }
     }
     const after = getRecord(name, id);
+    if (name === 'pm_logs') syncPmTask(after.pm_task_id);
     if (name === 'nesting_parts') { refreshNesting(current.nesting_id); if (after.nesting_id !== current.nesting_id) refreshNesting(after.nesting_id); }
     const changed = (o) => Object.fromEntries(cols.map((c) => [c, o[c] ?? null]));
     audit(user, 'update', name, id, changed(current), changed(after));
@@ -321,6 +345,7 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
     }
     db.prepare(`DELETE FROM ${name} WHERE id = ?`).run(id);
     if (name === 'nesting_parts') refreshNesting(row.nesting_id);
+    if (name === 'pm_logs') syncPmTask(row.pm_task_id);
     if (name === 'drawings' && row.stored_name) fs.rmSync(path.join(drawingsDir, row.stored_name), { force: true });
     audit(user, 'delete', name, id, row, null);
   }

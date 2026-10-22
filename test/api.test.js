@@ -590,3 +590,20 @@ test('data split by project, machine and type: nesting part counts, output/drawi
   assert.ok(dash.plates.some((p) => p.project === 'General stock'));
   assert.ok((await call(admin, 'GET', '/api/meta')).data.resources.pm_tasks.slicers.includes('machine_id'));
 });
+
+test('PM log by date: each check is dated, updates the checklist, and one item is logged once per date', async () => {
+  const machine = (await call(admin, 'GET', '/api/machines')).data[0];
+  const task = (await call(admin, 'POST', '/api/pm_tasks', { machine_id: machine.id, frequency: 'Daily', item_no: 'D-T1', task: 'Air pressure' })).data;
+  let r = await call(admin, 'POST', '/api/pm_logs', { date: '2026-10-20', pm_task_id: task.id, result: 'Pass', reading: '5 bar' });
+  assert.equal(r.status, 201);
+  assert.equal(r.data.machine_id, task.machine_id);
+  assert.equal(r.data.frequency, task.frequency);
+  assert.equal((await call(admin, 'POST', '/api/pm_logs', { date: '2026-10-20', pm_task_id: task.id, result: 'Fail' })).status, 409);
+  const later = (await call(admin, 'POST', '/api/pm_logs', { date: '2026-10-21', pm_task_id: task.id, result: 'Fail' })).data;
+  let t = (await call(admin, 'GET', `/api/pm_tasks/${task.id}`)).data;
+  assert.deepEqual([t.status, t.checked_on], ['Fail', '2026-10-21']);
+  await call(admin, 'DELETE', `/api/pm_logs/${later.id}`);
+  t = (await call(admin, 'GET', `/api/pm_tasks/${task.id}`)).data;
+  assert.deepEqual([t.status, t.checked_on], ['Pass', '2026-10-20']);
+  assert.equal((await call(admin, 'GET', `/api/pm_logs?machine_id=${task.machine_id}`)).data.length >= 1, true);
+});

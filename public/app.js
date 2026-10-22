@@ -399,6 +399,99 @@ async function viewDashboard() {
   ];
 }
 
+// ---------- PM check by date ---------------------------------------------------
+
+const PM_DAYS = { Daily: 1, Weekly: 7, Monthly: 30, Quarterly: 91, 'Semi-Annual': 182, Annual: 365 };
+const addDays = (iso, n) => new Date(Date.parse(`${iso}T00:00:00Z`) + n * 86400000).toISOString().slice(0, 10);
+const daysBetween = (a, b) => Math.round((Date.parse(`${b}T00:00:00Z`) - Date.parse(`${a}T00:00:00Z`)) / 86400000);
+
+async function viewPm() {
+  const qs = new URLSearchParams(location.hash.split('?')[1] || '');
+  const [machines, tasks, logs] = await Promise.all([api('GET', '/api/machines'), api('GET', '/api/pm_tasks'), api('GET', '/api/pm_logs')]);
+  const withTasks = machines.filter((m) => tasks.some((t) => t.machine_id === m.id));
+  const date = qs.get('date') || localToday();
+  const machineId = Number(qs.get('machine')) || (withTasks[0] || {}).id;
+  const freq = qs.get('freq') || 'Daily';
+  const go = (ch) => { const n = new URLSearchParams({ date, machine: machineId || '', freq, ...ch }); location.hash = `#/pm?${n}`; };
+  const canLog = right('pm_logs', 'create');
+
+  // Last check of each item up to the chosen date, and whether it is due by its frequency.
+  const last = new Map();
+  for (const l of logs) if (l.date <= date && (!last.has(l.pm_task_id) || l.date > last.get(l.pm_task_id).date)) last.set(l.pm_task_id, l);
+  const dueState = (t) => {
+    const l = last.get(t.id);
+    if (!l) return ['Never checked', 'bad'];
+    const age = daysBetween(l.date, date), every = PM_DAYS[t.frequency] || 1;
+    if (age >= every * 2) return [`Overdue ${age - every} day(s)`, 'bad'];
+    if (age >= every) return ['Due', 'warn'];
+    return [`Next ${fmtDate(addDays(l.date, every))}`, 'ok'];
+  };
+
+  const dateIn = h('input', { type: 'date', value: date, 'aria-label': 'Date', onchange: (e) => go({ date: e.target.value }) });
+  const head = pageHead('PM check log', 'clip', 'Daily care record of each machine, by date', dateIn);
+  const chipRow = (label, items, cur, key) => h('div', { class: 'slicer' }, h('span', { class: 'slicer-l' }, label),
+    h('div', { class: 'chips' }, items.map(([v, l, n]) => h('button', { type: 'button', class: `chip${String(cur) === String(v) ? ' on' : ''}`, onclick: () => go({ [key]: v }) }, l, h('span', { class: 'n' }, n)))));
+  const mTasks = tasks.filter((t) => t.machine_id === machineId);
+  head.append(h('div', { class: 'slicers' },
+    chipRow('Machine', withTasks.map((m) => [m.id, m.code, tasks.filter((t) => t.machine_id === m.id).length]), machineId, 'machine'),
+    chipRow('Frequency', Object.keys(PM_DAYS).filter((f) => mTasks.some((t) => t.frequency === f)).map((f) => [f, f, mTasks.filter((t) => t.frequency === f).length]), freq, 'freq')));
+
+  // Checklist for the chosen machine, frequency and date.
+  const list = mTasks.filter((t) => t.frequency === freq);
+  const todays = new Map(logs.filter((l) => l.date === date && l.machine_id === machineId).map((l) => [l.pm_task_id, l]));
+  const marks = new Map();
+  const saveBtn = h('button', { class: 'btn primary', onclick: async () => {
+    if (!marks.size) return toast('Mark Pass, Fail or N/A first', true);
+    let ok = 0;
+    for (const [id, mk] of marks) {
+      try { await api('POST', '/api/pm_logs', { date, pm_task_id: id, result: mk.result, reading: mk.reading.value || null, remarks: mk.remark.value || null }); ok++; }
+      catch (e) { toast(e.message, true); }
+    }
+    if (ok) toast(`${ok} check(s) saved for ${fmtDate(date)}`);
+    route();
+  } }, 'Save checks');
+  const rows = list.map((t) => {
+    const done = todays.get(t.id);
+    const [dueText, tone] = dueState(t);
+    const reading = h('input', { type: 'text', placeholder: 'Reading', 'aria-label': `Reading for ${t.task}` });
+    const remark = h('input', { type: 'text', placeholder: 'Remark', 'aria-label': `Remark for ${t.task}` });
+    const seg = h('div', { class: 'seg', role: 'group', 'aria-label': `Result for ${t.task}` }, ['Pass', 'Fail', 'N/A'].map((r) => h('button', { type: 'button', class: `seg-${r === 'N/A' ? 'na' : r.toLowerCase()}`, onclick: (e) => {
+      seg.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b === e.currentTarget));
+      marks.set(t.id, { result: r, reading, remark });
+      saveBtn.textContent = `Save ${marks.size} check(s)`;
+    } }, r)));
+    return h('div', { class: `pm-row${done ? ' done' : ''}` },
+      h('div', { class: 'pm-no' }, t.item_no || ''),
+      h('div', { class: 'pm-task' }, h('strong', {}, t.task), t.standard ? h('small', {}, t.standard) : null, h('span', { class: `pill ${tone}` }, dueText)),
+      done ? h('div', { class: 'pm-done' }, pill(done.result), done.reading ? ` ${done.reading}` : '', h('small', {}, `by ${done.checked_by}${done.remarks ? ` · ${done.remarks}` : ''}`))
+        : canLog ? h('div', { class: 'pm-in' }, seg, reading, remark) : h('div', { class: 'muted' }, 'Not checked'));
+  });
+  const m = machines.find((x) => x.id === machineId);
+  const doneCount = list.filter((t) => todays.has(t.id)).length;
+
+  // Log by date: the last 14 days for every machine.
+  const days = Array.from({ length: 14 }, (_, i) => addDays(date, -13 + i));
+  const grid = h('div', { class: 'table-wrap flat' }, h('table', { class: 'pm-grid' },
+    h('thead', {}, h('tr', {}, h('th', {}, 'Machine'), days.map((d) => h('th', { class: d === date ? 'today' : '' }, `${d.slice(8)}/${d.slice(5, 7)}`)))),
+    h('tbody', {}, withTasks.map((mc) => h('tr', {}, h('th', {}, mc.code), days.map((d) => {
+      const dl = logs.filter((l) => l.machine_id === mc.id && l.date === d);
+      const fail = dl.filter((l) => l.result === 'Fail').length;
+      return h('td', { class: `pm-cell ${dl.length ? (fail ? 'bad' : 'ok') : ''}`, title: dl.length ? `${mc.code} ${fmtDate(d)}: ${dl.length} checked, ${fail} fail` : `${mc.code} ${fmtDate(d)}: no check`,
+        onclick: () => go({ date: d, machine: mc.id }) }, dl.length ? (fail ? `${dl.length} · ${fail}✕` : dl.length) : '·');
+    }))))));
+
+  return [head,
+    h('section', { class: 'dcard' },
+      h('div', { class: 'dcard-h' }, h('span', { class: 'dcard-i' }, icon('gear')), h('h2', {}, `${m ? `${m.code} ${m.name}` : 'No machine'} · ${freq} · ${fmtDate(date)}`),
+        h('span', { class: 'muted' }, `${doneCount}/${list.length} done`)),
+      list.length ? rows : h('div', { class: 'empty' }, 'No PM items for this machine and frequency. Add them in PM checklist.'),
+      canLog && list.length > doneCount ? h('div', { class: 'ck-actions' }, saveBtn) : null),
+    h('section', { class: 'dcard gap-top' },
+      h('div', { class: 'dcard-h' }, h('span', { class: 'dcard-i' }, icon('cal')), h('h2', {}, 'Log by date (last 14 days)'), h('a', { href: '#/r/pm_logs' }, 'All PM logs')),
+      grid, h('p', { class: 'muted small' }, 'Number = items checked that day. ✕ = items that failed. Click a day to open it.')),
+  ];
+}
+
 // ---------- cockpit dashboard -------------------------------------------------
 
 const SVGNS = 'http://www.w3.org/2000/svg';
@@ -437,13 +530,14 @@ const ICONS = {
   user: 'M12 12a4 4 0 1 0 0-8a4 4 0 0 0 0 8z M4 21a8 8 0 0 1 16 0',
   search: 'M11 4a7 7 0 1 0 .01 0 M20 20l-4-4',
   pulse: 'M3 12h4l3-7 4 14 3-7h4',
+  board: 'M4 4h4v16H4z M10 4h4v10h-4z M16 4h4v6h-4z',
 };
 // The icon shown beside each page title.
 const PAGE_ICONS = {
   projects: 'folder', parts: 'box', routings: 'route', nestings: 'nest', nesting_parts: 'nest', wf_steps: 'flow', machines: 'gear', tooling: 'wrench',
-  plates: 'layers', drawings: 'draw', maint_orders: 'wrench', pm_tasks: 'clip', ncrs: 'alert', reason_codes: 'tag', job_travellers: 'jt', jt_steps: 'jt',
+  plates: 'layers', drawings: 'draw', maint_orders: 'wrench', pm_tasks: 'clip', pm_logs: 'cal', pm: 'clip', ncrs: 'alert', reason_codes: 'tag', job_travellers: 'jt', jt_steps: 'jt',
   operator_outputs: 'form', daily_logs: 'cal', inventory_items: 'box', inventory_moves: 'list', issues: 'chat', shop_processes: 'pulse',
-  '': 'grid', daily: 'grid', issue: 'chat', jt: 'jt', operator: 'form', find: 'search', layout: 'layout', 'project-new': 'plus', project: 'folder',
+  '': 'grid', daily: 'board', issue: 'chat', jt: 'jt', operator: 'form', find: 'search', layout: 'layout', 'project-new': 'plus', project: 'folder',
   ncr: 'alert', users: 'users', audit: 'clock', rights: 'shield', account: 'user', nesting: 'nest',
 };
 // Page title card: icon, title, a short line, and room for the slicer chips.
@@ -1482,23 +1576,53 @@ function renderLogin(message) {
   f.elements.username.focus();
 }
 
+// Side menu link: an icon bubble and the page name, with the same icons as the page titles.
+function navLink(href, label) {
+  const key = href.replace(/^#\/(r\/)?/, '');
+  return h('a', { href }, h('span', { class: 'nav-i' }, icon(PAGE_ICONS[key] || 'grid')), h('span', { class: 'nav-t' }, label));
+}
+
 function renderShell() {
   const groups = {};
   for (const [name, r] of Object.entries(state.meta.resources)) {
     if (name === 'drawings' || r.nav === false) continue;
     (groups[r.group] = groups[r.group] || []).push([`#/r/${name}`, r.label]);
   }
-  groups.Engineering = [['#/drawings', 'Drawings'], ...(groups.Engineering || [])];
+  groups.Engineering = [['#/drawings', 'Drawings'], ['#/pm', 'PM check log'], ...(groups.Engineering || [])];
   const daily = [['#/daily', 'Daily board'], ...(groups['Daily work'] || [])];
   groups.Production = [['#/operator', 'Operator form'], ['#/layout', 'Shop-floor layout'], ...(groups.Production || [])];
   if (right('projects', 'create')) groups.Planning = [['#/project-new', 'New project (parts)'], ...(groups.Planning || [])];
   delete groups['Daily work'];
+  const sections = Object.entries({ 'Daily work': daily, ...groups });
+  if (state.user.role === 'admin') sections.push(['Admin', [['#/users', 'Users'], ['#/rights', 'Access rights'], ['#/audit', 'Activity log']]]);
+  sections.push(['Account', [['#/account', 'My account']]]);
+  // Menu slicer: chips that show one menu group at a time, plus a quick filter by page name.
+  let pick = 'All';
+  try { pick = localStorage.getItem('smm-menu') || 'All'; } catch (e) { /* storage blocked */ }
+  if (pick !== 'All' && !sections.some(([g]) => g === pick)) pick = 'All';
+  const blocks = sections.map(([g, links]) => {
+    const items = links.map(([href, label]) => navLink(href, label));
+    return { g, el: h('div', { class: 'nav-group' }, h('h4', {}, g), items), items };
+  });
+  const filter = h('input', { type: 'search', class: 'nav-find', placeholder: 'Filter menu…', 'aria-label': 'Filter menu' });
+  const chips = h('div', { class: 'nav-chips', role: 'group', 'aria-label': 'Menu groups' });
+  function applyMenu() {
+    const q = filter.value.trim().toLowerCase();
+    chips.replaceChildren(...['All', ...sections.map(([g]) => g)].map((g) => h('button', { type: 'button', class: `nav-chip${pick === g ? ' on' : ''}`, 'aria-pressed': String(pick === g),
+      onclick: () => { pick = g; try { localStorage.setItem('smm-menu', g); } catch (e) { /* storage blocked */ } applyMenu(); } }, g)));
+    for (const b of blocks) {
+      let shown = 0;
+      for (const a of b.items) { const ok = !q || a.textContent.toLowerCase().includes(q); a.hidden = !ok; if (ok) shown++; }
+      b.el.hidden = !shown || (!q && pick !== 'All' && b.g !== pick);
+    }
+  }
+  filter.addEventListener('input', applyMenu);
+  applyMenu();
   const nav = h('nav', { class: 'side', id: 'side' },
     h('div', { class: 'brand' }, h('img', { src: 'icon.svg', alt: '' }), h('div', {}, 'Sheet Metal Manager', h('div', { class: 'brand-sub' }, state.meta.company))),
-    h('a', { href: '#/' }, 'Dashboard'),
-    Object.entries({ 'Daily work': daily, ...groups }).map(([g, links]) => [h('h4', {}, g), links.map(([href, label]) => h('a', { href }, label))]),
-    state.user.role === 'admin' ? [h('h4', {}, 'Admin'), h('a', { href: '#/users' }, 'Users'), h('a', { href: '#/rights' }, 'Access rights'), h('a', { href: '#/audit' }, 'Activity log')] : null,
-    h('h4', {}, 'Account'), h('a', { href: '#/account' }, 'My account'));
+    h('div', { class: 'nav-slicer' }, filter, chips),
+    navLink('#/', 'Dashboard'),
+    blocks.map((b) => b.el));
   const search = h('form', { class: 'find', role: 'search', onsubmit: (e) => {
     e.preventDefault();
     const q = search.elements.q.value.trim();
@@ -1527,6 +1651,7 @@ async function route() {
     if (!a) view = await viewDashboard();
     else if (a === 'r') view = viewList(b);
     else if (a === 'drawings') view = await viewDrawings();
+    else if (a === 'pm') view = await viewPm();
     else if (a === 'nesting') view = await viewNesting(Number(b));
     else if (a === 'daily') view = await viewDaily(b);
     else if (a === 'issue') view = await viewIssue(Number(b));

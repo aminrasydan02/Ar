@@ -224,6 +224,22 @@ const resources = {
       { name: 'remarks', label: 'Remarks', type: 'text', list: false },
     ],
   },
+  // One line per PM item checked on a date, so each machine keeps a dated care record.
+  pm_logs: {
+    label: 'PM log', singular: 'PM check', group: 'Engineering',
+    write: EVERYONE, ownerField: 'checked_by',
+    display: 'date',
+    fields: [
+      { name: 'date', label: 'Date', type: 'date', required: true },
+      { name: 'machine_id', label: 'Machine', type: 'ref', ref: 'machines', readonly: true },
+      { name: 'pm_task_id', label: 'PM item', type: 'ref', ref: 'pm_tasks', required: true },
+      { name: 'frequency', label: 'Frequency', type: 'text', readonly: true },
+      { name: 'result', label: 'Result', type: 'select', options: ['Pass', 'Fail', 'N/A'], required: true },
+      { name: 'reading', label: 'Reading / value', type: 'text' },
+      { name: 'remarks', label: 'Remarks', type: 'text' },
+      { name: 'checked_by', label: 'Checked by', type: 'text', readonly: true },
+    ],
+  },
   ncrs: {
     label: 'NCR', singular: 'NCR', group: 'Quality',
     write: ['admin'],
@@ -407,7 +423,7 @@ const OWNERS = {
   job_travellers: ['Planner', 'Supervisor'], jt_steps: ['Planner', 'Engineer'],
   operator_outputs: ['Operator', 'Supervisor'],
   inventory_items: ['Technician', 'Supervisor'],
-  pm_tasks: ['Technician', 'Supervisor'],
+  pm_tasks: ['Technician', 'Supervisor'], pm_logs: ['Technician', 'Supervisor', 'Operator'],
   nesting_parts: ['Planner', 'Engineer'],
 };
 for (const [name, list] of Object.entries(OWNERS)) resources[name].processes = list;
@@ -416,7 +432,7 @@ for (const [name, list] of Object.entries(OWNERS)) resources[name].processes = l
 const SLICERS = {
   projects: ['status', 'customer'], parts: ['project_id', 'make_buy'], nestings: ['project_id', 'material'], nesting_parts: ['nesting_id'],
   routings: ['machine_id'], wf_steps: ['status'], machines: ['machine_type', 'brand'], tooling: ['tool_type', 'machine_type'],
-  plates: ['project_id', 'material'], drawings: ['project_id', 'kind'], maint_orders: ['machine_id', 'kind'], pm_tasks: ['machine_id', 'frequency'],
+  plates: ['project_id', 'material'], drawings: ['project_id', 'kind'], maint_orders: ['machine_id', 'kind'], pm_tasks: ['machine_id', 'frequency'], pm_logs: ['machine_id', 'result'],
   ncrs: ['project_id', 'status'], reason_codes: ['kind'], job_travellers: ['project_id', 'status'], operator_outputs: ['project_id', 'process_id'],
   daily_logs: ['project_id', 'process'], inventory_items: ['item_group', 'status'], inventory_moves: ['move'], issues: ['to_process', 'status'],
 };
