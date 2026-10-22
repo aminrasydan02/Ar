@@ -555,3 +555,38 @@ test('Admin appoints full-edit users and changes process rights at any time; cha
   assert.equal(JSON.parse(change.before).full_edit, false);
   assert.ok(log.some((a) => a.resource === 'access_rights'));
 });
+
+test('data split by project, machine and type: nesting part counts, output/drawing project, tool machine type, plate stock per project', async () => {
+  const proj = (await call(admin, 'GET', '/api/projects')).data[0];
+  const nest = (await call(admin, 'POST', '/api/nestings', { project_id: proj.id, program: 'T-NEST-1', material: 'SS', thickness: 1.5, sheets: 2 })).data;
+  await call(admin, 'POST', '/api/nesting_parts', { nesting_id: nest.id, part_no: 'P-1', qty_per_sheet: 4, total_qty: 8 });
+  const second = (await call(admin, 'POST', '/api/nesting_parts', { nesting_id: nest.id, part_no: 'P-2', qty_per_sheet: 2, total_qty: 4 })).data;
+  let n = (await call(admin, 'GET', `/api/nestings/${nest.id}`)).data;
+  assert.deepEqual([n.part_count, n.part_qty, n.parts], [2, 12, 'P-1, P-2']);
+  await call(admin, 'DELETE', `/api/nesting_parts/${second.id}`);
+  n = (await call(admin, 'GET', `/api/nestings/${nest.id}`)).data;
+  assert.deepEqual([n.part_count, n.part_qty], [1, 8]);
+
+  const jt = (await call(admin, 'GET', '/api/job_travellers')).data.find((j) => j.project_id);
+  const proc = (await call(admin, 'GET', '/api/shop_processes')).data[0];
+  const out = (await call(admin, 'POST', '/api/operator_outputs', { date: '2026-10-22', process_id: proc.id, job_traveller_id: jt.id, good_qty: 1 })).data;
+  assert.equal(out.project_id, jt.project_id);
+
+  const pdf = Buffer.from('%PDF-1.4\n%test\n');
+  const up = await call(admin, 'POST', `/api/drawings/upload?filename=PRJ-DWG-1%20Rev%20A.pdf&project_id=${proj.id}`, pdf);
+  assert.equal(up.status, 201);
+  assert.equal(up.data.project_id, proj.id);
+  assert.equal((await call(admin, 'GET', `/api/drawings?project_id=${proj.id}`)).data.some((d) => d.part_no === 'PRJ-DWG-1'), true);
+
+  const m = (await call(admin, 'POST', '/api/machines', { code: 'T-PB9', name: 'Brake 9', machine_type: 'Press brake', brand: 'Amada', model: 'HG-1303', notes: 'Bay 2' })).data;
+  assert.deepEqual([m.brand, m.model, m.notes], ['Amada', 'HG-1303', 'Bay 2']);
+  const tool = (await call(admin, 'POST', '/api/tooling', { code: 'T-TOOL9', tool_type: 'Bending die (lower)', machine_id: m.id })).data;
+  assert.equal(tool.machine_type, 'Press brake');
+
+  await call(admin, 'POST', '/api/plates', { project_id: proj.id, material: 'SS', thickness: 1.5, qty: 3, min_qty: 5 });
+  const dash = (await call(admin, 'GET', '/api/dashboard')).data;
+  const row = dash.plates.find((p) => p.project_id === proj.id);
+  assert.equal(row.low >= 1, true);
+  assert.ok(dash.plates.some((p) => p.project === 'General stock'));
+  assert.ok((await call(admin, 'GET', '/api/meta')).data.resources.pm_tasks.slicers.includes('machine_id'));
+});

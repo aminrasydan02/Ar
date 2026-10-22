@@ -5,6 +5,8 @@
 
 const MACHINE_TYPES = ['Fiber laser', 'Press brake', 'Clinching/PEM press', 'Polishing/grinding',
   'Shearing', 'Turret punch', 'Welding', 'General'];
+const TOOL_TYPES = ['Punch', 'Die', 'Bending punch (upper)', 'Bending die (lower)', 'Clinching / PEM tool', 'Laser nozzle', 'Laser lens', 'Welding torch / tip',
+  'Polishing / grinding disc', 'Jig / fixture', 'Measuring', 'Other'];
 const MATERIALS = ['Aluminium', 'SS', 'SPCC', 'SECC', 'GI', 'Copper', 'Other'];
 // The job processes in the department, in the order work flows between them.
 const INVENTORY_GROUPS = ['Operator tools', 'Maintenance spares', 'Equipment'];
@@ -93,7 +95,22 @@ const resources = {
       { name: 'sheet_size', label: 'Sheet size', type: 'text' },
       { name: 'sheets', label: 'Sheets', type: 'number' },
       { name: 'cut_min', label: 'Cut time / sheet (min)', type: 'number' },
-      { name: 'parts', label: 'Parts on sheet', type: 'text' },
+      { name: 'part_count', label: 'Part numbers', type: 'number', readonly: true, help: 'Counted from the parts added to this nesting.' },
+      { name: 'part_qty', label: 'Total pcs', type: 'number', readonly: true },
+      { name: 'parts', label: 'Part numbers in nesting', type: 'text', readonly: true },
+    ],
+  },
+  // The part numbers cut in one nesting program, so each nesting shows how many parts it holds.
+  nesting_parts: {
+    label: 'Nesting parts', singular: 'Nesting part', group: 'Planning', nav: false,
+    write: ['admin', 'planner'],
+    display: 'part_no',
+    fields: [
+      { name: 'nesting_id', label: 'Nesting program', type: 'ref', ref: 'nestings', required: true },
+      { name: 'part_no', label: 'Part number', type: 'text', required: true },
+      { name: 'description', label: 'Description', type: 'text' },
+      { name: 'qty_per_sheet', label: 'Qty / sheet', type: 'number', default: 1 },
+      { name: 'total_qty', label: 'Total pcs', type: 'number' },
     ],
   },
   wf_steps: {
@@ -118,8 +135,11 @@ const resources = {
       { name: 'code', label: 'Code', type: 'text', required: true, unique: true },
       { name: 'name', label: 'Name', type: 'text', required: true },
       { name: 'machine_type', label: 'Type', type: 'select', options: MACHINE_TYPES, required: true },
+      { name: 'brand', label: 'Brand', type: 'text' },
+      { name: 'model', label: 'Model', type: 'text' },
       { name: 'location', label: 'Location', type: 'text' },
       { name: 'status', label: 'Status', type: 'select', options: ['Running', 'Idle', 'Down', 'Maintenance'], default: 'Running' },
+      { name: 'notes', label: 'Note', type: 'text' },
     ],
   },
   tooling: {
@@ -129,6 +149,8 @@ const resources = {
     fields: [
       { name: 'code', label: 'Code', type: 'text', required: true, unique: true },
       { name: 'description', label: 'Description', type: 'text' },
+      { name: 'tool_type', label: 'Tool type', type: 'select', options: TOOL_TYPES, required: true, default: 'Other' },
+      { name: 'machine_type', label: 'Machine type', type: 'select', options: MACHINE_TYPES, help: 'Filled from the machine when left empty.' },
       { name: 'machine_id', label: 'Machine', type: 'ref', ref: 'machines' },
       { name: 'location', label: 'Location', type: 'text' },
       { name: 'condition', label: 'Condition', type: 'select', options: ['Good', 'Worn', 'Damaged', 'Scrapped'], default: 'Good' },
@@ -139,6 +161,7 @@ const resources = {
     write: ['admin'],
     display: 'material',
     fields: [
+      { name: 'project_id', label: 'Project', type: 'ref', ref: 'projects', help: 'Leave empty for general stock.' },
       { name: 'material', label: 'Material', type: 'select', options: MATERIALS, required: true },
       { name: 'thickness', label: 'Thickness (mm)', type: 'number', required: true },
       { name: 'sheet_size', label: 'Sheet size', type: 'text' },
@@ -153,6 +176,7 @@ const resources = {
     write: ['admin'], upload: ['admin', 'planner'], noCreate: true,
     display: 'filename',
     fields: [
+      { name: 'project_id', label: 'Project', type: 'ref', ref: 'projects' },
       { name: 'part_no', label: 'Part number', type: 'text', required: true },
       { name: 'rev', label: 'Rev', type: 'text' },
       { name: 'kind', label: 'Type', type: 'text', readonly: true },
@@ -274,6 +298,7 @@ const resources = {
       { name: 'date', label: 'Date', type: 'date', required: true },
       { name: 'process_id', label: 'Process', type: 'ref', ref: 'shop_processes', required: true },
       { name: 'job_traveller_id', label: 'Job Traveller', type: 'ref', ref: 'job_travellers', required: true },
+      { name: 'project_id', label: 'Project', type: 'ref', ref: 'projects', readonly: true, help: 'Taken from the Job Traveller.' },
       { name: 'slot', label: 'Session / time slot', type: 'text' },
       { name: 'machine', label: 'Machine', type: 'text' },
       { name: 'good_qty', label: 'Good qty', type: 'number', required: true },
@@ -383,7 +408,18 @@ const OWNERS = {
   operator_outputs: ['Operator', 'Supervisor'],
   inventory_items: ['Technician', 'Supervisor'],
   pm_tasks: ['Technician', 'Supervisor'],
+  nesting_parts: ['Planner', 'Engineer'],
 };
 for (const [name, list] of Object.entries(OWNERS)) resources[name].processes = list;
 
-module.exports = { resources, columnType, MACHINE_TYPES, MATERIALS, PROCESSES, MOVE_SIGN };
+// Slicers: the chips under each page title that split a list by project, machine or type.
+const SLICERS = {
+  projects: ['status', 'customer'], parts: ['project_id', 'make_buy'], nestings: ['project_id', 'material'], nesting_parts: ['nesting_id'],
+  routings: ['machine_id'], wf_steps: ['status'], machines: ['machine_type', 'brand'], tooling: ['tool_type', 'machine_type'],
+  plates: ['project_id', 'material'], drawings: ['project_id', 'kind'], maint_orders: ['machine_id', 'kind'], pm_tasks: ['machine_id', 'frequency'],
+  ncrs: ['project_id', 'status'], reason_codes: ['kind'], job_travellers: ['project_id', 'status'], operator_outputs: ['project_id', 'process_id'],
+  daily_logs: ['project_id', 'process'], inventory_items: ['item_group', 'status'], inventory_moves: ['move'], issues: ['to_process', 'status'],
+};
+for (const [name, list] of Object.entries(SLICERS)) resources[name].slicers = list;
+
+module.exports = { resources, columnType, TOOL_TYPES, MACHINE_TYPES, MATERIALS, PROCESSES, MOVE_SIGN };

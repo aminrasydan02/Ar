@@ -35,6 +35,10 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
   fs.mkdirSync(drawingsDir, { recursive: true });
   const loadRights = () => setProcessRights(db.prepare('SELECT process, resource FROM process_rights').all());
   loadRights();
+  // Older records get their project from the Job Traveller they belong to.
+  db.exec(`UPDATE operator_outputs SET project_id = (SELECT project_id FROM job_travellers j WHERE j.id = operator_outputs.job_traveller_id) WHERE project_id IS NULL;
+    UPDATE drawings SET project_id = (SELECT project_id FROM job_travellers j WHERE j.id = drawings.job_traveller_id) WHERE project_id IS NULL AND job_traveller_id IS NOT NULL;
+    UPDATE tooling SET machine_type = (SELECT machine_type FROM machines m WHERE m.id = tooling.machine_id) WHERE machine_type IS NULL AND machine_id IS NOT NULL;`);
 
   function send(res, status, body, headers = {}) {
     const isBuf = Buffer.isBuffer(body);
@@ -206,6 +210,28 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
 
   // ---- inventory stock ----------------------------------------------------
   const stockStatus = (qty, min) => (qty <= 0 ? 'Out' : qty <= (min || 0) ? 'Low' : 'OK');
+  // Fields copied from a linked record: project from the Job Traveller, machine type from the machine.
+  function linkFields(name, data, current = {}) {
+    const v = (k) => (k in data ? data[k] : current[k]);
+    if (name === 'operator_outputs' && v('job_traveller_id')) {
+      const jt = db.prepare('SELECT project_id FROM job_travellers WHERE id = ?').get(v('job_traveller_id'));
+      data.project_id = jt ? jt.project_id : null;
+    }
+    if (name === 'tooling' && !v('machine_type') && v('machine_id')) {
+      const m = db.prepare('SELECT machine_type FROM machines WHERE id = ?').get(v('machine_id'));
+      if (m) data.machine_type = m.machine_type;
+    }
+  }
+
+  // A nesting shows how many part numbers and pieces it holds, and which part numbers.
+  function refreshNesting(id) {
+    if (!id) return;
+    const rows = db.prepare('SELECT part_no, COALESCE(total_qty, 0) AS q FROM nesting_parts WHERE nesting_id = ? ORDER BY part_no').all(id);
+    const names = [...new Set(rows.map((r) => r.part_no))];
+    db.prepare('UPDATE nestings SET part_count = ?, part_qty = ?, parts = ? WHERE id = ?')
+      .run(names.length, rows.reduce((n, r) => n + r.q, 0), names.join(', '), id);
+  }
+
   function setStock(itemId, qty) {
     const item = db.prepare('SELECT min_qty FROM inventory_items WHERE id = ?').get(itemId);
     db.prepare("UPDATE inventory_items SET qty_on_hand = ?, status = ?, updated_at = datetime('now') WHERE id = ?").run(qty, stockStatus(qty, item.min_qty), itemId);
@@ -242,6 +268,7 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
     if (name === 'daily_logs') data.logged_by = user.username;
     if (name === 'operator_outputs') data.operator = user.username;
     if (name === 'job_travellers' && !data.jt_no) data.jt_no = nextNumber('job_travellers', 'jt_no', 'JT');
+    linkFields(name, data);
     const cols = Object.keys(data);
     try {
       const r = db.prepare(`INSERT INTO ${name} (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
@@ -249,6 +276,7 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
       const id = Number(r.lastInsertRowid);
       if (stock) setStock(stock.item.id, (stock.item.qty_on_hand || 0) + stock.delta);
       if (name === 'inventory_items' && data.qty_on_hand > 0) logMove(id, 'Receive', data.qty_on_hand, user, 'Opening stock');
+      if (name === 'nesting_parts') refreshNesting(data.nesting_id);
       audit(user, 'create', name, id, null, data);
       return getRecord(name, id);
     } catch (err) { throw friendlyDbError(err); }
@@ -268,6 +296,7 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
       if (qty !== (current.qty_on_hand ?? 0)) logMove(id, 'Adjust', qty - (current.qty_on_hand ?? 0), user, 'Stock count');
       data.status = stockStatus(qty, data.min_qty ?? current.min_qty);
     }
+    linkFields(name, data, current);
     const cols = Object.keys(data);
     if (cols.length) {
       try {
@@ -276,6 +305,7 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
       } catch (err) { throw friendlyDbError(err); }
     }
     const after = getRecord(name, id);
+    if (name === 'nesting_parts') { refreshNesting(current.nesting_id); if (after.nesting_id !== current.nesting_id) refreshNesting(after.nesting_id); }
     const changed = (o) => Object.fromEntries(cols.map((c) => [c, o[c] ?? null]));
     audit(user, 'update', name, id, changed(current), changed(after));
     return after;
@@ -290,6 +320,7 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
       if (item) setStock(row.item_id, Math.max(0, (item.qty_on_hand || 0) - (sign === 0 ? row.qty : sign * row.qty)));
     }
     db.prepare(`DELETE FROM ${name} WHERE id = ?`).run(id);
+    if (name === 'nesting_parts') refreshNesting(row.nesting_id);
     if (name === 'drawings' && row.stored_name) fs.rmSync(path.join(drawingsDir, row.stored_name), { force: true });
     audit(user, 'delete', name, id, row, null);
   }
@@ -319,7 +350,10 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
     const rev = (url.searchParams.get('rev') || parsed.rev).trim().toUpperCase();
     if (!partNo) throw new HttpError(400, 'Part number missing');
     const jtId = Number(url.searchParams.get('job_traveller_id')) || null;
-    if (jtId && !db.prepare('SELECT id FROM job_travellers WHERE id = ?').get(jtId)) throw new HttpError(400, 'Job Traveller not found');
+    const jt = jtId ? db.prepare('SELECT id, project_id FROM job_travellers WHERE id = ?').get(jtId) : null;
+    if (jtId && !jt) throw new HttpError(400, 'Job Traveller not found');
+    const projectId = Number(url.searchParams.get('project_id')) || (jt && jt.project_id) || null;
+    if (projectId && !db.prepare('SELECT id FROM projects WHERE id = ?').get(projectId)) throw new HttpError(400, 'Project not found');
     const body = await readBody(req, MAX_UPLOAD);
     if (!body.length) throw new HttpError(400, 'File is empty');
     const bad = checkContent(parsed.format, body);
@@ -334,8 +368,8 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
       // A new revision of the same part and format supersedes the older ones.
       db.prepare("UPDATE drawings SET status = 'Superseded', updated_at = datetime('now') WHERE part_no = ? AND format = ? AND status = 'Current'")
         .run(partNo, parsed.format);
-      const r = db.prepare(`INSERT INTO drawings (part_no, rev, format, kind, job_traveller_id, status, filename, size, stored_name, uploaded_by)
-        VALUES (?, ?, ?, ?, ?, 'Current', ?, ?, ?, ?)`).run(partNo, rev, parsed.format, kind, jtId, filename, body.length, storedName, user.username);
+      const r = db.prepare(`INSERT INTO drawings (project_id, part_no, rev, format, kind, job_traveller_id, status, filename, size, stored_name, uploaded_by)
+        VALUES (?, ?, ?, ?, ?, ?, 'Current', ?, ?, ?, ?)`).run(projectId, partNo, rev, parsed.format, kind, jtId, filename, body.length, storedName, user.username);
       db.exec('COMMIT');
       const id = Number(r.lastInsertRowid);
       audit(user, 'upload', 'drawings', id);

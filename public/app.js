@@ -185,30 +185,76 @@ async function editRecord(resName, row, preset, onSaved) {
 
 // A searchable table for one module. `filter` limits rows (e.g. { project_id: 3 }),
 // `extra` adds buttons to the toolbar, `rowActions` adds buttons to each row.
-function recordTable(resName, { filter = {}, extra = [], rowActions, columns, onRow } = {}) {
+// Lists split by the module's slicers (project, machine, type...): one chip row per slicer,
+// and while the first slicer shows "All", rows are grouped under that slicer's values.
+const NONE_LABEL = { project_id: 'No project', machine_id: 'No machine', nesting_id: 'No nesting' };
+function slicerValue(field, r) {
+  const v = field.type === 'ref' ? r[`${field.name}__label`] : r[field.name];
+  return v === null || v === undefined || v === '' ? '' : String(v);
+}
+
+function recordTable(resName, { filter = {}, extra = [], rowActions, columns, onRow, slicerSlot, noneLabel, onLoad } = {}) {
   const res = state.meta.resources[resName];
   const fields = res.fields.filter((f) => f.list !== false && (!columns || columns.includes(f.name)));
+  const slicers = (res.slicers || []).filter((n) => !(n in filter)).map((n) => res.fields.find((f) => f.name === n)).filter(Boolean);
+  const picked = {};
   const wrap = h('div');
   const search = h('input', { type: 'search', placeholder: `Search ${res.label.toLowerCase()}…` });
   const tableBox = h('div', { class: 'table-wrap' });
   const count = h('span', { class: 'muted' });
+  const slicerBox = h('div', { class: 'slicers' });
+  let rows = [];
+  const none = (f) => (noneLabel && noneLabel[f.name]) || NONE_LABEL[f.name] || 'Not set';
+
+  function drawSlicers() {
+    slicerBox.replaceChildren(...slicers.map((f) => {
+      // Counts follow the other slicers, so the numbers always add up to what is shown.
+      const base = rows.filter((r) => slicers.every((g) => g === f || picked[g.name] === undefined || slicerValue(g, r) === picked[g.name]));
+      const counts = new Map();
+      for (const r of base) { const v = slicerValue(f, r); counts.set(v, (counts.get(v) || 0) + 1); }
+      const values = [...counts.keys()].sort((a, b) => (a === '') - (b === '') || a.localeCompare(b, undefined, { numeric: true }));
+      const chip = (v, label, n) => h('button', { type: 'button', class: `chip${picked[f.name] === v ? ' on' : ''}`, 'aria-pressed': String(picked[f.name] === v),
+        onclick: () => { if (v === undefined || picked[f.name] === v) delete picked[f.name]; else picked[f.name] = v; draw(); } },
+        label, h('span', { class: 'n' }, n));
+      return h('div', { class: 'slicer', role: 'group', 'aria-label': `Filter by ${f.label}` },
+        h('span', { class: 'slicer-l' }, f.label),
+        h('div', { class: 'chips' }, chip(undefined, 'All', base.length), values.map((v) => chip(v, v || none(f), counts.get(v)))));
+    }));
+    slicerBox.hidden = !slicers.length || !rows.length;
+  }
+
+  function draw() {
+    drawSlicers();
+    const shown = rows.filter((r) => slicers.every((g) => picked[g.name] === undefined || slicerValue(g, r) === picked[g.name]));
+    count.textContent = `${shown.length} record${shown.length === 1 ? '' : 's'}`;
+    if (!shown.length) { tableBox.replaceChildren(h('div', { class: 'empty' }, rows.length ? 'Nothing matches this selection.' : 'No records yet.')); return; }
+    const span = fields.length + (rowActions ? 1 : 0);
+    const line = (r) => h('tr', { class: 'click', onclick: () => (onRow ? onRow(r, load) : editRecord(resName, r, null, load)) },
+      fields.map((f) => h('td', { class: f.type === 'number' ? 'num' : '' }, cellValue(f, r))),
+      rowActions ? h('td', { onclick: (e) => e.stopPropagation() }, rowActions(r, load)) : null);
+    const g = slicers[0];
+    let body;
+    if (g && picked[g.name] === undefined) {
+      const groups = new Map();
+      for (const r of shown) { const v = slicerValue(g, r); if (!groups.has(v)) groups.set(v, []); groups.get(v).push(r); }
+      const keys = [...groups.keys()].sort((a, b) => (a === '') - (b === '') || a.localeCompare(b, undefined, { numeric: true }));
+      body = keys.map((k) => [h('tr', { class: 'group' }, h('td', { colspan: span }, h('strong', {}, k || none(g)), h('span', { class: 'muted' }, ` · ${groups.get(k).length}`))),
+        groups.get(k).map(line)]);
+    } else body = shown.map(line);
+    tableBox.replaceChildren(h('table', {},
+      h('thead', {}, h('tr', {}, fields.map((f) => h('th', {}, f.label)), rowActions ? h('th', {}, '') : null)),
+      h('tbody', {}, body)));
+  }
 
   async function load() {
     const qs = new URLSearchParams({ ...filter, ...(search.value ? { q: search.value } : {}) });
-    try {
-      const rows = await api('GET', `/api/${resName}?${qs}`);
-      count.textContent = `${rows.length} record${rows.length === 1 ? '' : 's'}`;
-      if (!rows.length) { tableBox.replaceChildren(h('div', { class: 'empty' }, 'No records yet.')); return; }
-      tableBox.replaceChildren(h('table', {},
-        h('thead', {}, h('tr', {}, fields.map((f) => h('th', {}, f.label)), rowActions ? h('th', {}, '') : null)),
-        h('tbody', {}, rows.map((r) => h('tr', { class: 'click', onclick: () => (onRow ? onRow(r, load) : editRecord(resName, r, null, load)) },
-          fields.map((f) => h('td', { class: f.type === 'number' ? 'num' : '' }, cellValue(f, r))),
-          rowActions ? h('td', { onclick: (e) => e.stopPropagation() }, rowActions(r, load)) : null)))));
-    } catch (e) { tableBox.replaceChildren(h('div', { class: 'msg err' }, e.message)); }
+    try { rows = await api('GET', `/api/${resName}?${qs}`); draw(); if (onLoad) onLoad(rows); }
+    catch (e) { tableBox.replaceChildren(h('div', { class: 'msg err' }, e.message)); }
   }
   let timer;
   search.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(load, 250); });
 
+  if (slicerSlot) slicerSlot.append(slicerBox); else wrap.append(slicerBox);
   wrap.append(h('div', { class: 'toolbar' },
     search, count, h('span', { class: 'grow' }),
     extra,
@@ -217,8 +263,18 @@ function recordTable(resName, { filter = {}, extra = [], rowActions, columns, on
       h('button', { class: 'btn', onclick: () => templateImportDialog(resName, load) }, 'Import template')] : null,
     right(resName, 'export') ? h('a', { class: 'btn', href: `/api/${resName}/export.xlsx?${new URLSearchParams(filter)}` }, 'Export Excel') : null,
     right(resName, 'export') ? h('a', { class: 'btn', href: `/api/${resName}/export.csv?${new URLSearchParams(filter)}` }, 'CSV') : null,
-    right(resName, 'create') ? h('button', { class: 'btn primary', onclick: () => (onRow ? onRow(null, load) : editRecord(resName, null, filter, load)) }, `+ New ${res.singular}`) : null),
+    right(resName, 'create') && !res.noCreate ? h('button', { class: 'btn primary', onclick: () => (onRow ? onRow(null, load) : editRecord(resName, null, { ...filter, ...presetFromSlicers() }, load)) }, `+ New ${res.singular}`) : null),
     tableBox);
+  // A new record starts in the project or machine picked on the slicer.
+  function presetFromSlicers() {
+    const out = {};
+    for (const f of slicers) {
+      if (!picked[f.name]) continue;
+      const r = rows.find((x) => slicerValue(f, x) === picked[f.name]);
+      if (r) out[f.name] = r[f.name];
+    }
+    return out;
+  }
   load();
   wrap.reload = load;
   return wrap;
@@ -278,72 +334,68 @@ function viewSwitch() {
 async function viewDashboard() {
   const d = await api('GET', '/api/dashboard');
   if (dashMode() === 'cockpit') return viewCockpit(d);
-  const k = d.kpi;
-  const tile = (n, l, alert) => h('div', { class: `kpi${alert && n ? ' alert' : ''}` }, h('div', { class: 'n' }, typeof n === 'number' ? fmtNum(n) : n), h('div', { class: 'l' }, l));
-  const pr = d.production;
+  const k = d.kpi, pr = d.production;
+  const stat = (ic, value, label, note, tone) => h('div', { class: `stat ${tone || ''}` }, h('span', { class: 'stat-i' }, icon(ic)),
+    h('div', {}, h('div', { class: 'stat-n' }, value), h('div', { class: 'stat-l' }, label), note ? h('div', { class: 'stat-s' }, note) : null));
+  const dcard = (title, ic, body, link, wide) => h('section', { class: `dcard${wide ? ' wide' : ''}` },
+    h('div', { class: 'dcard-h' }, h('span', { class: 'dcard-i' }, icon(ic)), h('h2', {}, title), link ? h('a', { href: link[0] }, link[1]) : null), body);
+  const table = (heads, rows, nums = []) => h('div', { class: 'table-wrap flat' }, h('table', {},
+    h('thead', {}, h('tr', {}, heads.map((t, i) => h('th', { class: nums.includes(i) ? 'num' : '' }, t)))),
+    h('tbody', {}, rows)));
+  const empty = (t) => h('div', { class: 'empty' }, t);
+  const colours = ['var(--ring-1)', 'var(--ring-2)', 'var(--ring-3)', 'var(--ring-4)'];
+
+  const processBars = d.processes.map((p, i) => {
+    const v = Math.min(100, p.completion), col = colours[i % 4];
+    const fill = h('div', { class: 'fill' }); fill.style.width = `${v}%`; fill.style.background = col;
+    return h('div', { class: 'pbar' },
+      h('div', { class: 'pbar-t' }, h('strong', {}, p.name), p.bottleneck ? h('span', { class: 'pill bad' }, 'Bottleneck') : null,
+        h('span', { class: 'grow' }), h('span', { class: 'muted' }, `${fmtNum(p.good)} / ${fmtNum(p.target)} pcs · ${fmtNum(p.remaining_days)} day(s) left`), h('b', {}, fmtPct(p.completion))),
+      h('div', { class: 'track', role: 'meter', 'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-valuenow': v, 'aria-label': `${p.name} completion` }, fill));
+  });
+
   return [
-    h('div', { class: 'head-row' }, h('h1', {}, 'Dashboard'), viewSwitch()),
-    h('h2', {}, `Production by process (net ${d.minutesPerDay} min/day)`),
-    h('div', { class: 'kpis' },
-      tile(pr.target, 'Process target (pcs)'), tile(pr.good, 'Actual good (pcs)'), tile(pr.balance, 'Remaining balance (pcs)'),
-      tile(fmtPct(pr.completion), 'Overall completion'), tile(fmtPct(pr.yield), 'First-pass yield'),
-      tile(fmtNum(pr.remaining_min / 60, 1), 'Remaining workload (hrs)')),
-    h('div', { class: 'table-wrap gap-top' }, h('table', {},
-      h('thead', {}, h('tr', {}, ['Process', 'Steps', 'Target', 'Good', 'Reject', 'Balance', 'Completion', 'Yield', 'Remaining (min)', 'Days', ''].map((t) => h('th', {}, t)))),
-      h('tbody', {}, d.processes.map((p) => {
-        const bar = h('div'); bar.style.width = `${Math.min(100, p.completion)}%`;
-        return h('tr', {}, h('td', {}, p.name), h('td', { class: 'num' }, p.steps), h('td', { class: 'num' }, fmtNum(p.target)),
-          h('td', { class: 'num' }, fmtNum(p.good)), h('td', { class: 'num' }, fmtNum(p.reject)), h('td', { class: 'num' }, fmtNum(p.balance)),
-          h('td', {}, h('div', { class: 'bar' }, bar), ` ${fmtPct(p.completion)}`), h('td', { class: 'num' }, fmtPct(p.yield)),
-          h('td', { class: 'num' }, fmtNum(p.remaining_min, 1)), h('td', { class: 'num' }, fmtNum(p.remaining_days)),
-          h('td', {}, p.bottleneck ? h('span', { class: 'pill bad' }, 'Bottleneck') : ''));
-      })))),
-    h('h2', {}, 'Overview'),
-    h('div', { class: 'kpis' },
-      tile(k.active_projects, 'Active projects'), tile(k.parts, 'Parts'), tile(k.total_pcs, 'Total pieces'),
-      tile(k.drawings, 'Current drawings'), tile(k.open_ncrs, 'Open NCRs', true), tile(k.open_work_orders, 'Open maintenance', true),
-      tile(k.machines_down, 'Machines down', true), tile(k.low_stock, 'Plates at/below minimum', true),
-      tile(k.logs_today, 'Activities logged today'), tile(k.open_issues, 'Open issues', true)),
-    d.issues.length ? [h('h2', {}, 'Open issues'), issueTable(d.issues)] : null,
-    h('h2', {}, 'Projects'),
-    d.projects.length ? h('div', { class: 'table-wrap' }, h('table', {},
-      h('thead', {}, h('tr', {}, ['Project', 'Name', 'Customer', 'Due', 'Status', 'Parts', 'Progress'].map((t) => h('th', {}, t)))),
-      h('tbody', {}, d.projects.map((p) => {
+    pageHead('Dashboard', 'grid', `${fmtDate(localToday())} · net ${d.minutesPerDay} working min/day`, viewSwitch()),
+    h('div', { class: 'stat-grid' },
+      stat('pulse', fmtPct(pr.completion), 'Overall completion', `${fmtNum(pr.good)} of ${fmtNum(pr.target)} pcs`, 't1'),
+      stat('check', fmtPct(pr.yield), 'First-pass yield', `${fmtNum(pr.reject)} rejected`, 't2'),
+      stat('clock', fmtNum(pr.remaining_min / 60, 1), 'Hours of work left', `${fmtNum(pr.balance)} pcs to make`, 't3'),
+      stat('folder', fmtNum(k.active_projects), 'Active projects', `${fmtNum(k.parts)} parts`, 't4'),
+      stat('chat', fmtNum(k.open_issues), 'Open issues', `${fmtNum(k.open_ncrs)} open NCR`, k.open_issues ? 'alert' : 't2'),
+      stat('gear', fmtNum(k.machines_down), 'Machines down', `${fmtNum(k.open_work_orders)} open maintenance`, k.machines_down ? 'alert' : 't2')),
+    h('div', { class: 'dgrid' },
+      dcard('Production by process', 'pulse', processBars.length ? processBars : empty('No Job Traveller routing yet.'), ['#/r/job_travellers', 'Job Travellers'], true),
+      dcard('Projects', 'folder', d.projects.length ? table(['Project', 'Due', 'Status', 'Progress'], d.projects.map((p) => {
         const pct = p.steps ? Math.round((p.steps_done / p.steps) * 100) : 0;
-        const bar = h('div');
-        bar.style.width = `${pct}%`;
+        const bar = h('div'); bar.style.width = `${pct}%`;
         return h('tr', { class: 'click', onclick: () => { location.hash = `#/project/${p.id}`; } },
-          h('td', {}, p.code), h('td', {}, p.name), h('td', {}, p.customer || ''), h('td', {}, fmtDate(p.due_date)),
-          h('td', {}, pill(p.status)), h('td', { class: 'num' }, p.parts),
+          h('td', {}, h('strong', {}, p.code), h('div', { class: 'muted small' }, p.name)), h('td', {}, fmtDate(p.due_date)), h('td', {}, pill(p.status)),
           h('td', {}, h('div', { class: 'bar', title: `${p.steps_done}/${p.steps} steps` }, bar), ` ${pct}%`));
-      })))) : h('div', { class: 'panel muted' }, 'No active projects.'),
-    h('h2', {}, 'Workflow board'),
-    d.workflow.length ? h('div', { class: 'table-wrap' }, h('table', {},
-      h('thead', {}, h('tr', {}, ['Part', 'Project', 'Current step', 'Flow'].map((t) => h('th', {}, t)))),
-      h('tbody', {}, d.workflow.map((w) => h('tr', {},
+      })) : empty('No active projects.'), ['#/r/projects', 'All projects']),
+      dcard('Plate stock by project', 'layers', d.plates.length ? table(['Project', 'Materials', 'Sizes', 'Sheets', 'Stock'], d.plates.map((p) =>
+        h('tr', { class: 'click', onclick: () => { location.hash = '#/r/plates'; } },
+          h('td', {}, h('strong', {}, p.project), p.name ? h('div', { class: 'muted small' }, p.name) : null), h('td', {}, p.materials || ''),
+          h('td', { class: 'num' }, p.sizes), h('td', { class: 'num' }, fmtNum(p.sheets)), h('td', {}, pill(p.low ? 'Low' : 'OK'), p.low ? ` ${p.low} size(s)` : ''))), [2, 3]) :
+        empty('No plates recorded.'), ['#/r/plates', 'Plate stock']),
+      dcard('Open issues', 'chat', d.issues.length ? table(['Issue', 'From → To', 'Status'], d.issues.slice(0, 8).map((i) =>
+        h('tr', { class: 'click', onclick: () => { location.hash = `#/issue/${i.id}`; } }, h('td', {}, h('strong', {}, i.title), h('div', { class: 'muted small' }, `${i.issue_no} · ${i.priority}`)),
+          h('td', {}, `${i.from_process || ''} → ${i.to_process || ''}`), h('td', {}, pill(i.status))))) :
+        empty('No open issues.'), ['#/r/issues', 'All issues']),
+      dcard('Machines', 'gear', table(['Machine', 'Type', 'Status', 'Load (days)', 'Availability'], d.load.map((m) => {
+        const dt = d.downtime.find((x) => x.code === m.code);
+        return h('tr', {}, h('td', {}, h('strong', {}, m.code)), h('td', {}, m.machine_type || ''), h('td', {}, pill(m.status)),
+          h('td', { class: 'num' }, fmtNum(m.load_days)), h('td', { class: 'num' }, dt ? `${dt.availability}%` : '—'));
+      }), [3, 4]), ['#/r/machines', 'Machines']),
+      dcard('Workflow board', 'flow', d.workflow.length ? table(['Part', 'Project', 'Now at', 'Flow'], d.workflow.map((w) => h('tr', {},
         h('td', {}, w.part_no), h('td', {}, w.project), h('td', {}, pill(w.current === 'Completed' ? 'Completed' : 'In progress'), ' ', w.current),
-        h('td', {}, h('div', { class: 'flow' }, w.steps.map((s) => h('span', { class: s.status === 'Done' ? 'done' : s.step === w.current ? 'doing' : '' }, s.step))))))))) :
-      h('div', { class: 'panel muted' }, 'No workflow yet. Open a part and choose "Create workflow" to build it from the routing.'),
-    h('div', { class: 'grid2' },
-      h('div', {}, h('h2', {}, `Machine load (${d.minutesPerDay} min/day)`),
-        h('div', { class: 'table-wrap' }, h('table', {},
-          h('thead', {}, h('tr', {}, ['Machine', 'Type', 'Status', 'Load (min)', 'Days'].map((t) => h('th', {}, t)))),
-          h('tbody', {}, d.load.map((m) => h('tr', {}, h('td', {}, m.code), h('td', {}, m.machine_type || ''), h('td', {}, pill(m.status)),
-            h('td', { class: 'num' }, fmtNum(m.load_min, 0)), h('td', { class: 'num' }, fmtNum(m.load_days)))))))),
-      h('div', {}, h('h2', {}, 'Maintenance, last 30 days'),
-        h('div', { class: 'table-wrap' }, h('table', {},
-          h('thead', {}, h('tr', {}, ['Machine', 'Breakdowns', 'Downtime (min)', 'Availability', 'MTBF', 'MTTR'].map((t) => h('th', {}, t)))),
-          h('tbody', {}, d.downtime.map((m) => h('tr', {}, h('td', {}, m.code), h('td', { class: 'num' }, m.breakdowns),
-            h('td', { class: 'num' }, m.downtime_min), h('td', { class: 'num' }, `${m.availability}%`),
-            h('td', { class: 'num' }, m.mtbf_min ?? '—'), h('td', { class: 'num' }, m.mttr_min ?? '—')))))))),
-    d.lowStock.length ? [h('h2', {}, 'Plates at or below minimum'), h('div', { class: 'table-wrap' }, h('table', {},
-      h('thead', {}, h('tr', {}, ['Material', 'Thickness', 'Size', 'Qty', 'Minimum'].map((t) => h('th', {}, t)))),
-      h('tbody', {}, d.lowStock.map((p) => h('tr', {}, h('td', {}, p.material), h('td', {}, p.thickness), h('td', {}, p.sheet_size || ''),
-        h('td', { class: 'num' }, p.qty), h('td', { class: 'num' }, p.min_qty))))))] : null,
-    d.lowItems.length ? [h('h2', {}, 'Inventory to reorder'), h('div', { class: 'table-wrap' }, h('table', {},
-      h('thead', {}, h('tr', {}, ['Item', 'Name', 'Group', 'Location', 'On hand', 'Minimum', 'Stock'].map((t) => h('th', {}, t)))),
-      h('tbody', {}, d.lowItems.map((i) => h('tr', {}, h('td', {}, i.code), h('td', {}, i.name), h('td', {}, i.item_group), h('td', {}, i.location || ''),
-        h('td', { class: 'num' }, `${fmtNum(i.qty_on_hand)} ${i.unit || ''}`), h('td', { class: 'num' }, fmtNum(i.min_qty)), h('td', {}, pill(i.status)))))))] : null,
+        h('td', {}, h('div', { class: 'flow' }, w.steps.map((s) => h('span', { class: s.status === 'Done' ? 'done' : s.step === w.current ? 'doing' : '' }, s.step))))))) :
+        empty('No workflow yet. Open a part and choose "Create workflow".'), ['#/r/wf_steps', 'Workflow'], true),
+      d.lowItems.length || d.lowStock.length ? dcard('To reorder', 'box', table(['Item', 'Where', 'On hand', 'Minimum', 'Stock'], [
+        ...d.lowStock.map((p) => h('tr', {}, h('td', {}, `${p.material} ${fmtNum(p.thickness)} mm ${p.sheet_size || ''}`), h('td', {}, p.project),
+          h('td', { class: 'num' }, fmtNum(p.qty)), h('td', { class: 'num' }, fmtNum(p.min_qty)), h('td', {}, pill(p.qty > 0 ? 'Low' : 'Out')))),
+        ...d.lowItems.map((i) => h('tr', {}, h('td', {}, `${i.code} ${i.name}`), h('td', {}, i.location || i.item_group),
+          h('td', { class: 'num' }, `${fmtNum(i.qty_on_hand)} ${i.unit || ''}`), h('td', { class: 'num' }, fmtNum(i.min_qty)), h('td', {}, pill(i.status))))], [2, 3]),
+        ['#/r/inventory_items', 'Inventory'], true) : null),
   ];
 }
 
@@ -368,7 +420,38 @@ const ICONS = {
   file: 'M6 3h9l4 4v14H6z M14 3v5h5',
   chat: 'M4 5h16v11H9l-5 4z M8 9h8 M8 12h5',
   alert: 'M12 3l10 18H2z M12 10v4 M12 17v1',
+  grid: 'M3 3h8v8H3z M13 3h8v5h-8z M13 10h8v11h-8z M3 13h8v8H3z',
+  folder: 'M3 6h6l2 2h10v11H3z',
+  nest: 'M3 3h18v18H3z M7 7h4v4H7z M13 7h4v3h-4z M7 13h3v4H7z M12 13h5v4h-5z',
+  route: 'M4 6h10 M4 12h16 M4 18h7 M17 3l3 3-3 3',
+  flow: 'M3 5h6v5H3z M15 14h6v5h-6z M9 7.5h3a2 2 0 0 1 2 2v7h1',
+  wrench: 'M15 4a5 5 0 0 0 5 5l-10 10a2.1 2.1 0 0 1-3-3L17 6a5 5 0 0 0-2-2z',
+  layers: 'M12 3l9 5-9 5-9-5z M3 13l9 5 9-5',
+  clip: 'M9 3h6v3H9z M6 5H5v16h14V5h-1 M8 13l3 3 5-6',
+  tag: 'M3 3h8l10 10-8 8L3 11z M7 7h.01',
+  cal: 'M4 5h16v16H4z M4 10h16 M8 3v4 M16 3v4',
+  list: 'M4 4h16v16H4z M8 9h8 M8 13h8 M8 17h5',
+  users: 'M9 11a4 4 0 1 0 0-8a4 4 0 0 0 0 8z M2 21a7 7 0 0 1 14 0 M16 3a4 4 0 0 1 0 8 M18 14a6 6 0 0 1 4 7',
+  shield: 'M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z',
+  clock: 'M12 7v5l3 2 M12 3a9 9 0 1 0 .01 0',
+  user: 'M12 12a4 4 0 1 0 0-8a4 4 0 0 0 0 8z M4 21a8 8 0 0 1 16 0',
+  search: 'M11 4a7 7 0 1 0 .01 0 M20 20l-4-4',
+  pulse: 'M3 12h4l3-7 4 14 3-7h4',
 };
+// The icon shown beside each page title.
+const PAGE_ICONS = {
+  projects: 'folder', parts: 'box', routings: 'route', nestings: 'nest', nesting_parts: 'nest', wf_steps: 'flow', machines: 'gear', tooling: 'wrench',
+  plates: 'layers', drawings: 'draw', maint_orders: 'wrench', pm_tasks: 'clip', ncrs: 'alert', reason_codes: 'tag', job_travellers: 'jt', jt_steps: 'jt',
+  operator_outputs: 'form', daily_logs: 'cal', inventory_items: 'box', inventory_moves: 'list', issues: 'chat', shop_processes: 'pulse',
+  '': 'grid', daily: 'grid', issue: 'chat', jt: 'jt', operator: 'form', find: 'search', layout: 'layout', 'project-new': 'plus', project: 'folder',
+  ncr: 'alert', users: 'users', audit: 'clock', rights: 'shield', account: 'user', nesting: 'nest',
+};
+// Page title card: icon, title, a short line, and room for the slicer chips.
+function pageHead(title, iconName, sub, ...extra) {
+  return h('header', { class: 'page-head' },
+    h('div', { class: 'ph-row' }, h('span', { class: 'ph-icon' }, icon(iconName || 'grid')),
+      h('div', { class: 'ph-text' }, h('h1', {}, title), sub ? h('p', {}, sub) : null), extra));
+}
 const icon = (n) => svg('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.8', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true' }, svg('path', { d: ICONS[n] }));
 
 function ring(pct, colour, title, sub) {
@@ -498,9 +581,11 @@ async function viewCockpit(d) {
       h('a', { href: `#/issue/${i.id}` }, h('span', { class: `circ${i.status === 'In progress' ? ' on' : ''}`, 'aria-hidden': 'true' }),
         h('span', {}, i.title, h('small', {}, `${i.from_process || ''} → ${i.to_process || ''} · ${i.status}`)))) :
       h('p', { class: 'muted' }, 'Nothing waiting for you.'))),
+    card('Plate stock by project', h('div', { class: 'ck-tasks' }, d.plates.map((p) =>
+      h('a', { href: '#/r/plates' }, icon('layers'), h('span', {}, p.project, ' ', pill(p.low ? 'Low' : 'OK'), h('small', {}, `${fmtNum(p.sheets)} sheets · ${p.materials || ''}`)))))),
     card('Schedule', calendar(marks)));
 
-  return [h('div', { class: 'head-row' }, h('h1', {}, `Hello, ${name.split(' ')[0]}`), viewSwitch()), h('div', { class: 'ck' }, left, mid, rightCol)];
+  return [pageHead(`Hello, ${name.split(' ')[0]}`, 'grid', `${fmtDate(localToday())} · ${[me.process, me.role].filter(Boolean).join(' · ')}`, viewSwitch()), h('div', { class: 'ck' }, left, mid, rightCol)];
 }
 
 function viewList(resName) {
@@ -516,7 +601,11 @@ function viewList(resName) {
     if (right('job_travellers', 'create')) opts.extra = [h('button', { class: 'btn', onclick: () => importDialog(() => route()) }, 'Import NEWAYS report')];
   }
   if (resName === 'operator_outputs') opts.onRow = (r, reload) => outputDialog(r, {}, reload);
-  return [h('h1', {}, res.label), recordTable(resName, opts)];
+  if (resName === 'nestings') opts.rowActions = (r) => h('a', { class: 'btn small', href: `#/nesting/${r.id}` }, `Parts (${r.part_count || 0})`);
+  if (resName === 'plates') opts.noneLabel = { project_id: 'General stock' };
+  const head = pageHead(res.label, PAGE_ICONS[resName], res.slicers ? `Split by ${res.slicers.map((n) => res.fields.find((f) => f.name === n).label.toLowerCase()).join(' and ')}` : null);
+  opts.slicerSlot = head;
+  return [head, recordTable(resName, opts)];
 }
 
 function workflowButton(part, reload) {
@@ -535,6 +624,7 @@ function drawingActions(r) {
 }
 
 function uploadBox(onDone, preset) {
+  // preset is read when files are sent, so a project picked later still applies.
   const input = h('input', { type: 'file', multiple: true, accept: state.meta.formats.map((f) => `.${f}`).join(','), hidden: true });
   const box = h('div', { class: 'drop' },
     h('div', {}, 'Drop drawing files here or ', h('a', { href: '#', onclick: (e) => { e.preventDefault(); input.click(); } }, 'choose files')),
@@ -557,9 +647,27 @@ function uploadBox(onDone, preset) {
   return box;
 }
 
-function viewDrawings() {
-  const table = recordTable('drawings', { rowActions: drawingActions });
-  return [h('h1', {}, 'Drawings'), right('drawings', 'upload') ? uploadBox(() => table.reload()) : null, table];
+async function viewDrawings() {
+  const head = pageHead('Drawings and 3D models', 'draw', 'Upload and find drawings by project');
+  const table = recordTable('drawings', { rowActions: drawingActions, slicerSlot: head });
+  if (!right('drawings', 'upload')) return [head, table];
+  const projects = await api('GET', '/api/projects');
+  const pick = h('select', { 'aria-label': 'Project for the upload' }, h('option', { value: '' }, '— choose project —'),
+    projects.map((p) => h('option', { value: p.id }, `${p.code} · ${p.name}`)));
+  const preset = {};
+  pick.addEventListener('change', () => { if (pick.value) preset.project_id = pick.value; else delete preset.project_id; });
+  return [head, h('div', { class: 'panel upload-panel' }, h('div', { class: 'field' }, h('label', {}, 'Upload to project'), pick), uploadBox(() => table.reload(), preset)), table];
+}
+
+async function viewNesting(id) {
+  const n = await api('GET', `/api/nestings/${id}`);
+  const head = pageHead(`Nesting ${n.program}`, 'nest', `${n.project_id__label || ''} · ${n.material || ''} ${n.thickness ? `${n.thickness} mm` : ''} · ${n.sheets || 0} sheet(s)`);
+  const kpi = (v, l) => h('div', { class: 'kpi' }, h('div', { class: 'n' }, fmtNum(v)), h('div', { class: 'l' }, l));
+  const stats = h('div', { class: 'kpis' });
+  const table = recordTable('nesting_parts', { filter: { nesting_id: id }, onLoad: (rows) => stats.replaceChildren(
+    kpi(new Set(rows.map((r) => r.part_no)).size, 'Part numbers'), kpi(rows.reduce((t, r) => t + (r.total_qty || 0), 0), 'Total pcs'),
+    kpi(n.sheets || 0, 'Sheets'), kpi((n.cut_min || 0) * (n.sheets || 0), 'Cut time (min)')) });
+  return [head, h('p', {}, h('a', { href: '#/r/nestings' }, '‹ All nesting programs')), stats, h('h2', {}, 'Part numbers in this nesting'), table];
 }
 
 async function viewProject(id) {
@@ -723,8 +831,7 @@ async function viewDaily(dateArg) {
   });
 
   return [
-    h('div', { class: 'toolbar' },
-      h('h1', { class: 'grow' }, 'Daily board'),
+    pageHead('Daily board', 'grid', 'What each process did and handed over',
       h('button', { class: 'btn', onclick: () => shift(-1) }, '‹ Previous day'), picker,
       h('button', { class: 'btn', onclick: () => shift(1) }, 'Next day ›'),
       date !== localToday() ? h('a', { class: 'btn', href: '#/daily' }, 'Today') : null,
@@ -1069,7 +1176,7 @@ async function viewLayout(versionArg) {
   window.onbeforeunload = () => (dirty ? true : undefined);
   draw();
   return [
-    h('div', { class: 'toolbar' }, h('h1', { class: 'grow' }, 'Shop-floor layout'), pick),
+    pageHead('Shop-floor layout', 'layout', 'Sheet metal area, drawn to scale', pick),
     h('p', { class: 'muted' }, data.version ? `Version ${data.version}, saved by ${data.saved_by} on ${fmtDate(data.created_at)}${versionArg ? ' (older version)' : ''}.` : 'Not saved yet: this is a starting layout from the machine list and inventory locations.'),
     canEdit ? h('div', { class: 'toolbar' }, Object.entries(LAYOUT_TYPES).map(([k, v]) => h('button', { class: 'btn small', onclick: () => add(k) }, `+ ${v}`)),
       h('span', { class: 'grow' }), note, h('button', { class: 'btn primary', onclick: save }, versionArg ? 'Restore as latest' : 'Save layout'), status) : null,
@@ -1419,7 +1526,8 @@ async function route() {
   try {
     if (!a) view = await viewDashboard();
     else if (a === 'r') view = viewList(b);
-    else if (a === 'drawings') view = viewDrawings();
+    else if (a === 'drawings') view = await viewDrawings();
+    else if (a === 'nesting') view = await viewNesting(Number(b));
     else if (a === 'daily') view = await viewDaily(b);
     else if (a === 'issue') view = await viewIssue(Number(b));
     else if (a === 'jt' && c === 'print') view = await viewJobTravellerPrint(Number(b));
@@ -1438,7 +1546,10 @@ async function route() {
   } catch (e) {
     view = [h('div', { class: 'msg err' }, e.message)];
   }
-  content().replaceChildren(...[view].flat(Infinity).filter((v) => v !== null && v !== undefined && v !== false));
+  const nodesOut = [view].flat(Infinity).filter((v) => v !== null && v !== undefined && v !== false);
+  // Pages that start with a plain title get the title card with their icon.
+  if (nodesOut[0] instanceof HTMLElement && nodesOut[0].tagName === 'H1') nodesOut[0] = pageHead(nodesOut[0].textContent, PAGE_ICONS[a || '']);
+  content().replaceChildren(...nodesOut);
   window.scrollTo(0, 0);
 }
 
