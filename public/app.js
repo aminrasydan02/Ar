@@ -263,13 +263,26 @@ function templateImportDialog(resName, onDone) {
 
 // ---------- views ------------------------------------------------------------
 
+// Dashboard layout: "classic" tables or the "cockpit" cards. Remembered on this PC only.
+function dashMode() {
+  try { const m = localStorage.getItem('smm-dash'); if (m) return m; } catch (e) { /* storage blocked */ }
+  return state.user.theme === 'galaxy' ? 'cockpit' : 'classic';
+}
+function viewSwitch() {
+  const mode = dashMode();
+  const pick = (m) => { try { localStorage.setItem('smm-dash', m); } catch (e) { /* storage blocked */ } route(); };
+  return h('div', { class: 'view-switch', role: 'group', 'aria-label': 'Dashboard layout' },
+    [['cockpit', 'Cockpit'], ['classic', 'Classic']].map(([m, l]) => h('button', { type: 'button', class: mode === m ? 'on' : '', 'aria-pressed': String(mode === m), onclick: () => pick(m) }, l)));
+}
+
 async function viewDashboard() {
   const d = await api('GET', '/api/dashboard');
+  if (dashMode() === 'cockpit') return viewCockpit(d);
   const k = d.kpi;
   const tile = (n, l, alert) => h('div', { class: `kpi${alert && n ? ' alert' : ''}` }, h('div', { class: 'n' }, typeof n === 'number' ? fmtNum(n) : n), h('div', { class: 'l' }, l));
   const pr = d.production;
   return [
-    h('h1', {}, 'Dashboard'),
+    h('div', { class: 'head-row' }, h('h1', {}, 'Dashboard'), viewSwitch()),
     h('h2', {}, `Production by process (net ${d.minutesPerDay} min/day)`),
     h('div', { class: 'kpis' },
       tile(pr.target, 'Process target (pcs)'), tile(pr.good, 'Actual good (pcs)'), tile(pr.balance, 'Remaining balance (pcs)'),
@@ -332,6 +345,162 @@ async function viewDashboard() {
       h('tbody', {}, d.lowItems.map((i) => h('tr', {}, h('td', {}, i.code), h('td', {}, i.name), h('td', {}, i.item_group), h('td', {}, i.location || ''),
         h('td', { class: 'num' }, `${fmtNum(i.qty_on_hand)} ${i.unit || ''}`), h('td', { class: 'num' }, fmtNum(i.min_qty)), h('td', {}, pill(i.status)))))))] : null,
   ];
+}
+
+// ---------- cockpit dashboard -------------------------------------------------
+
+const SVGNS = 'http://www.w3.org/2000/svg';
+function svg(tag, attrs, ...kids) {
+  const el = document.createElementNS(SVGNS, tag);
+  for (const [k, v] of Object.entries(attrs || {})) el.setAttribute(k, v);
+  for (const c of kids.flat()) if (c) el.append(c);
+  return el;
+}
+const ICONS = {
+  form: 'M6 3h9l4 4v14H6z M14 3v5h5 M9 13h7 M9 17h5',
+  jt: 'M4 6h16 M4 12h16 M4 18h10 M18 16l2 2 3-4',
+  layout: 'M3 3h18v18H3z M3 10h8 M11 3v18 M15 14h6',
+  box: 'M3 7l9-4 9 4v10l-9 4-9-4z M3 7l9 4 9-4 M12 11v10',
+  draw: 'M4 20l4-1 11-11-3-3L5 16z M14 6l3 3',
+  check: 'M4 12l5 5L20 6',
+  plus: 'M12 5v14 M5 12h14',
+  gear: 'M12 8a4 4 0 1 0 0 8a4 4 0 1 0 0-8 M12 2v3 M12 19v3 M2 12h3 M19 12h3 M5 5l2 2 M17 17l2 2 M5 19l2-2 M17 7l2-2',
+  file: 'M6 3h9l4 4v14H6z M14 3v5h5',
+  chat: 'M4 5h16v11H9l-5 4z M8 9h8 M8 12h5',
+  alert: 'M12 3l10 18H2z M12 10v4 M12 17v1',
+};
+const icon = (n) => svg('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.8', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true' }, svg('path', { d: ICONS[n] }));
+
+function ring(pct, colour, title, sub) {
+  const r = 34, c = 2 * Math.PI * r, v = Math.max(0, Math.min(100, Number(pct) || 0));
+  const arc = svg('circle', { cx: 44, cy: 44, r, fill: 'none', 'stroke-width': 8, 'stroke-linecap': 'round', stroke: colour,
+    'stroke-dasharray': `${(v / 100) * c} ${c}`, transform: 'rotate(-90 44 44)' });
+  return h('div', { class: 'ck-ring' }, h('div', { class: 't' }, title), h('div', { class: 's' }, sub),
+    svg('svg', { viewBox: '0 0 88 88', role: 'img', 'aria-label': `${title} ${fmtPct(v)}` },
+      svg('circle', { class: 'ck-track', cx: 44, cy: 44, r, fill: 'none', 'stroke-width': 8 }), v ? arc : null,
+      svg('text', { x: 44, y: 50, 'text-anchor': 'middle' }, `${Math.round(v)}%`)));
+}
+
+function donut(parts) {
+  const total = parts.reduce((n, p) => n + p.n, 0) || 1, r = 52, c = 2 * Math.PI * r;
+  let off = 0;
+  const arcs = parts.filter((p) => p.n).map((p) => {
+    const len = (p.n / total) * c;
+    const a = svg('circle', { cx: 75, cy: 75, r, fill: 'none', 'stroke-width': 18, stroke: p.colour,
+      'stroke-dasharray': `${len} ${c - len}`, 'stroke-dashoffset': String(-off), transform: 'rotate(-90 75 75)' });
+    off += len;
+    return a;
+  });
+  return h('div', { class: 'ck-donut' },
+    svg('svg', { viewBox: '0 0 150 150', role: 'img', 'aria-label': parts.map((p) => `${p.label} ${p.n}`).join(', ') },
+      svg('circle', { class: 'ck-track', cx: 75, cy: 75, r, fill: 'none', 'stroke-width': 18 }), arcs,
+      svg('text', { x: 75, y: 74, 'text-anchor': 'middle', 'font-size': 26, 'font-weight': 700 }, String(parts.reduce((n, p) => n + p.n, 0))),
+      svg('text', { x: 75, y: 94, 'text-anchor': 'middle', 'font-size': 11 }, 'Job Travellers')),
+    h('div', { class: 'ck-legend' }, parts.map((p) => {
+      const sw = h('span', { class: 'sw' }); sw.style.background = p.colour;
+      return h('div', {}, sw, `${p.label} `, h('strong', {}, p.n), h('span', { class: 'muted' }, ` (${Math.round((p.n / total) * 100)}%)`));
+    })));
+}
+
+function calendar(marks) {
+  const today = localToday();
+  const [y, m] = today.split('-').map(Number);
+  const first = new Date(Date.UTC(y, m - 1, 1)).getUTCDay();
+  const days = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  const cells = [];
+  for (let i = 0; i < (first + 6) % 7; i++) cells.push(h('div', { class: 'd out' }));
+  for (let d = 1; d <= days; d++) {
+    const iso = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+    const due = marks[iso];
+    cells.push(h('div', { class: `d${iso === today ? ' today' : due ? ' due' : ''}`, title: due ? due.join(', ') : null }, d));
+  }
+  const month = new Date(Date.UTC(y, m - 1, 1)).toLocaleString('en-MY', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+  return [h('div', { class: 'ck-sub' }, month),
+    h('div', { class: 'ck-cal' }, ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su'].map((x) => h('div', { class: 'dn' }, x)), cells),
+    h('div', { class: 'ck-cal-note' }, 'Pink: today. Orange: Job Traveller or project due.')];
+}
+
+async function viewCockpit(d) {
+  const get = (url) => api('GET', url).catch(() => []);
+  const [jts, drawings, pm, machines, projects] = await Promise.all(['/api/job_travellers', '/api/drawings', '/api/pm_tasks', '/api/machines', '/api/projects'].map(get));
+  const me = state.user, pr = d.production;
+  const name = me.full_name || me.username;
+  const initials = name.split(/\s+/).map((w) => w[0]).join('').slice(0, 2).toUpperCase();
+  const live = jts.filter((j) => j.status !== 'Cancelled');
+  const approved = live.filter((j) => j.approved_on).length;
+  const checked = pm.filter((t) => t.status === 'Pass' || t.status === 'Fail');
+  const passRate = checked.length ? (checked.filter((t) => t.status === 'Pass').length / checked.length) * 100 : 0;
+  const card = (title, ...kids) => h('section', { class: 'ck-card' }, title ? h('h3', {}, title) : null, kids);
+
+  // Left: profile, quick links, help
+  const quick = [['#/operator', 'form', 'Operator form'], ['#/r/job_travellers', 'jt', 'Job Travellers'], ['#/layout', 'layout', 'Shop-floor layout'],
+    ['#/r/inventory_items', 'box', 'Inventory'], ['#/drawings', 'draw', 'Drawings and STEP'], ['#/r/pm_tasks', 'check', 'PM checklist'],
+    ['#/r/machines', 'gear', 'Machines'], ['#/daily', 'chat', 'Daily board']];
+  if (right('projects', 'create')) quick.push(['#/project-new', 'plus', 'New project']);
+  const left = h('div', { class: 'ck-col' },
+    h('section', { class: 'ck-card ck-profile' },
+      h('div', { class: 'ck-avatar', 'aria-hidden': 'true' }, initials),
+      h('div', { class: 'ck-name' }, name),
+      h('div', { class: 'ck-role' }, [me.process, me.role].filter(Boolean).join(' · ')),
+      h('nav', { class: 'ck-links', 'aria-label': 'My pages' },
+        h('a', { href: '#/daily' }, 'Daily board', h('span', { 'aria-hidden': 'true' }, '›')),
+        h('a', { href: '#/r/issues' }, 'Issues', h('span', {}, d.kpi.open_issues)),
+        h('a', { href: '#/account' }, 'My account', h('span', { 'aria-hidden': 'true' }, '›')))),
+    card('Quick links', h('nav', { class: 'ck-quick', 'aria-label': 'Quick links' },
+      quick.map(([href, ic, label]) => h('a', { href, class: ic === 'plus' ? 'add' : null, title: label, 'aria-label': label }, icon(ic))))),
+    h('section', { class: 'ck-card' }, h('a', { class: 'ck-help', href: '#/r/issues' }, icon('chat'),
+      h('span', {}, h('strong', {}, 'Need help?'), h('br'), h('span', { class: 'dot' }), h('small', { class: 'muted' }, 'Raise an issue to any process')))));
+
+  // Middle: rings, machines, focus, process bars, status donut
+  const nextJt = live.find((j) => !j.approved_on && j.status !== 'Completed');
+  const machineIcon = { Running: 'check', Idle: 'gear', Down: 'alert', Maintenance: 'gear' };
+  const colours = ['var(--ring-1)', 'var(--ring-2)', 'var(--ring-3)', 'var(--ring-4)'];
+  const count = (st) => live.filter((j) => j.status === st).length;
+  const mid = h('div', { class: 'ck-mid' },
+    h('section', { class: 'ck-card wide' }, h('div', { class: 'ck-rings' },
+      h('div', { class: 'ck-intro' }, h('div', { class: 'big' }, 'Production'), h('p', {}, `${fmtNum(pr.good)} of ${fmtNum(pr.target)} pcs good. ${fmtNum(pr.remaining_min / 60, 1)} hours of work left at ${d.minutesPerDay} min/day.`)),
+      ring(pr.completion, colours[0], 'Completion', 'all processes'),
+      ring(pr.yield, colours[1], 'Yield', 'first pass'),
+      ring(live.length ? (approved / live.length) * 100 : 0, colours[2], 'Approved', `${approved}/${live.length} JTs`),
+      ring(passRate, colours[3], 'PM pass', `${checked.length} checks`))),
+    card('Machines', h('div', { class: 'ck-list' }, machines.slice(0, 8).map((m) =>
+      h('div', {}, icon(machineIcon[m.status] || 'gear'), h('span', {}, m.code, ' ', pill(m.status), h('small', {}, m.name || m.machine_type || '')))))),
+    card('Next to approve', nextJt ? [
+      h('div', { class: 'ck-focus' }, h('div', { class: 'ico' }, icon('jt')),
+        h('div', {}, h('p', {}, h('strong', {}, nextJt.jt_no), ` · ${nextJt.part_no || ''}`),
+          h('p', {}, nextJt.description || ''), h('p', {}, `Qty ${fmtNum(nextJt.qty)} · due ${fmtDate(nextJt.due_date) || '—'}`))),
+      h('div', { class: 'ck-actions' }, h('a', { class: 'btn', href: `#/jt/${nextJt.id}` }, 'Open'),
+        right('job_travellers', 'approve') ? h('a', { class: 'btn grad', href: `#/jt/${nextJt.id}` }, 'Review and approve') : null)]
+      : h('p', { class: 'muted' }, 'Every Job Traveller is approved.')),
+    card('Completion by process', d.processes.map((p, i) => {
+      const v = Math.min(100, p.completion), col = colours[i % 4];
+      const fill = h('div', { class: 'fill' }), knob = h('div', { class: 'knob' });
+      fill.style.width = `${v}%`; fill.style.background = col; knob.style.left = `${v}%`; knob.style.background = col;
+      return h('div', { class: 'ck-bar' }, h('div', { class: 'row' }, h('span', {}, p.name, p.bottleneck ? [' ', h('span', { class: 'pill bad' }, 'Bottleneck')] : null), h('b', {}, fmtPct(p.completion))),
+        h('div', { class: 'track', role: 'meter', 'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-valuenow': v, 'aria-label': `${p.name} completion` }, fill, knob));
+    })),
+    card('Job Traveller status', donut([
+      { label: 'Planned', n: count('Planned'), colour: colours[2] }, { label: 'In progress', n: count('In progress'), colour: colours[3] },
+      { label: 'Completed', n: count('Completed'), colour: colours[1] }, { label: 'On hold', n: count('On hold'), colour: colours[0] }])));
+
+  // Right: recent docs, tasks, calendar
+  const docs = [...drawings].sort((a, b) => String(b.created_at || b.id).localeCompare(String(a.created_at || a.id), undefined, { numeric: true })).slice(0, 5);
+  const tasks = d.issues.filter((i) => !me.process || i.to_process === me.process || me.role === 'admin').slice(0, 6);
+  const marks = {};
+  for (const x of [...live.filter((j) => j.status !== 'Completed').map((j) => [j.due_date, j.jt_no]), ...projects.map((p) => [p.due_date, p.code])]) {
+    if (x[0]) (marks[x[0].slice(0, 10)] = marks[x[0].slice(0, 10)] || []).push(x[1]);
+  }
+  const rightCol = h('div', { class: 'ck-col ck-right' },
+    card('Recent drawings and STEP', h('div', { class: 'ck-docs' }, docs.length ? docs.map((x) =>
+      h('a', { href: '#/drawings' }, icon(x.kind === '3D model' ? 'box' : 'file'), h('span', {}, `${x.part_no} rev ${x.rev || '-'}`, h('small', {}, `${x.kind || 'Drawing'} · ${(x.format || '').toUpperCase()}`)))) :
+      h('p', { class: 'muted' }, 'No files yet.'))),
+    card('My tasks', h('div', { class: 'ck-tasks' }, tasks.length ? tasks.map((i) =>
+      h('a', { href: `#/issue/${i.id}` }, h('span', { class: `circ${i.status === 'In progress' ? ' on' : ''}`, 'aria-hidden': 'true' }),
+        h('span', {}, i.title, h('small', {}, `${i.from_process || ''} → ${i.to_process || ''} · ${i.status}`)))) :
+      h('p', { class: 'muted' }, 'Nothing waiting for you.'))),
+    card('Schedule', calendar(marks)));
+
+  return [h('div', { class: 'head-row' }, h('h1', {}, `Hello, ${name.split(' ')[0]}`), viewSwitch()), h('div', { class: 'ck' }, left, mid, rightCol)];
 }
 
 function viewList(resName) {
@@ -1167,6 +1336,7 @@ const THEMES = [
   ['dark', 'Dark', 'Low glare for night shift and bright screens.', ['#0f1317', '#2f6fb8', '#e8a948', '#1c2228']],
   ['green', 'Soft green', 'Green tones that are easy on the eyes.', ['#1e4d3a', '#24604a', '#e0a43a', '#f2f5f1']],
   ['contrast', 'High contrast', 'Black and white with thick lines. Easiest to read from a distance.', ['#000000', '#00307a', '#ffcc00', '#ffffff']],
+  ['galaxy', 'Galaxy', 'Purple glass cards with colour rings. Opens the Cockpit dashboard.', ['#17123f', '#7c3aed', '#f472b6', '#2dd4bf']],
 ];
 function applyTheme(t) { document.documentElement.dataset.theme = t || 'standard'; }
 

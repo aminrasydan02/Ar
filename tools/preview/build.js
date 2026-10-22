@@ -40,6 +40,8 @@ async function main() {
     database.close();
   }
   snap['/api/me'].version = `${snap['/api/me'].version} preview`;
+  // THEME=galaxy opens the preview in that colour theme (and so the Cockpit dashboard).
+  if (process.env.THEME) snap['/api/me'].user.theme = process.env.THEME;
   const today = new Date().toISOString().slice(0, 10);
   const check = fs.existsSync(path.join(dbDir, 'data-check.md')) ? fs.readFileSync(path.join(dbDir, 'data-check.md'), 'utf8') : '';
   const icon = `data:image/svg+xml;base64,${fs.readFileSync(path.join(PUBLIC, 'icon.svg')).toString('base64')}`;

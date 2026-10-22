@@ -115,6 +115,7 @@ during a quiet period.
 ```
 node tools/preview/load.js /tmp/smm-preview <neways-reports-dir> <maintenance-bom-dir>
 node tools/preview/build.js /tmp/smm-preview preview.html
+THEME=galaxy node tools/preview/build.js /tmp/smm-preview preview.html   # opens in the Galaxy theme and Cockpit dashboard
 ```
 
 `load.js` fills a new database through the website's own API: NEWAYS schedule reports and

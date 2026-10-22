@@ -15,7 +15,7 @@ const VERSION = require('../../package.json').version;
 const PUBLIC_DIR = path.join(__dirname, '..', '..', 'public');
 const MAX_JSON = 1024 * 1024;
 const MAX_UPLOAD = 100 * 1024 * 1024;
-const THEMES = ['standard', 'light', 'dark', 'green', 'contrast']; // public/styles.css [data-theme]
+const THEMES = ['standard', 'light', 'dark', 'green', 'contrast', 'galaxy']; // public/styles.css [data-theme]
 const STATIC_TYPES = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.png': 'image/png',
