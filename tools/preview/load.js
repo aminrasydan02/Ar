@@ -53,6 +53,7 @@ async function main() {
     await loadMaintenance(api);
     await loadBom(api);
     await loadLayout(api);
+    await loadPlan(api);
   } finally {
     server.close();
     database.close();
@@ -220,6 +221,32 @@ async function loadBom(api) {
   const res = await api('POST', '/api/projects/tree', { sets, create_jts: true, parts,
     project: { code: 'ENC-2026-01', name: txt(val('project name:')), customer: 'Internal', work_order: assembly, due_date: due, status: 'Planned' } });
   notes.push(`BOM ${file}: project ENC-2026-01 with ${res.parts.length} parts (${res.parts.filter((p) => p.jt_no).length} Job Travellers for Make parts, ${sets} sets).`);
+}
+
+// Production schedule: NEWAYS lines use the day counts in each schedule report (every report starts
+// on Day 1, so the processes run side by side); ENC-2026-01 uses the website's auto plan from routing.
+async function loadPlan(api) {
+  const DAYS = { 'Laser Cutting': [3, 'LC-01'], Polishing: [4, 'PL-01'], Bending: [6, 'BD-01'], Clinching: [3, 'CL-01'] };
+  const [projects, procs, machines] = await Promise.all(['/api/projects', '/api/shop_processes', '/api/machines'].map((u) => api('GET', u)));
+  const start = new Date().toISOString().slice(0, 10);
+  const workDay = (iso, n) => {
+    let d = new Date(`${iso}T00:00:00Z`);
+    const step = () => { d = new Date(d.getTime() + 86400000); };
+    while (d.getUTCDay() === 0) step();
+    for (let i = 0; i < n; i++) { step(); while (d.getUTCDay() === 0) step(); }
+    return d.toISOString().slice(0, 10);
+  };
+  const neways = projects.find((p) => p.code === 'NEWAYS');
+  for (const [name, [days, mc]] of Object.entries(DAYS)) {
+    const proc = procs.find((p) => p.name === name);
+    const machine = machines.find((m) => m.code === mc);
+    if (!proc) continue;
+    await api('POST', '/api/schedules', { project_id: neways.id, process_id: proc.id, machine_id: machine ? machine.id : null, start_date: workDay(start, 0),
+      end_date: workDay(start, days - 1), status: 'In progress', notes: `${days} days in the NEWAYS ${name} schedule report` });
+  }
+  notes.push('Production schedule: NEWAYS lines take the day counts from the 4 schedule reports (Laser 3, Polishing 4, Bending 6, Clinching 3 days, all from Day 1 = build date). ENC-2026-01 is auto-planned from its Job Traveller routing.');
+  const enc = projects.find((p) => p.code === 'ENC-2026-01');
+  if (enc) await api('POST', '/api/schedules/auto', { project_id: enc.id, start_date: workDay(start, 6) });
 }
 
 // Shop-floor layout in process order: Laser -> Polishing -> Bending -> Clinching -> Welding / QC.

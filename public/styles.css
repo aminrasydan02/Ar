@@ -566,3 +566,48 @@ tr.group .pdot { margin-right: 8px; }
 }
 /* Brighter chart colours on dark themes (after the :root defaults so they win) */
 html[data-theme="galaxy"], html[data-theme="dark"] { --ring-1: #f472b6; --ring-2: #2dd4bf; --ring-3: #a78bfa; --ring-4: #fb923c; --on-ring: #160f38; }
+
+/* Gantt chart (schedule) */
+.gantt { display: grid; gap: 4px; margin-top: 12px; }
+.g-row { display: grid; grid-template-columns: minmax(150px, 220px) minmax(0, 1fr); gap: 12px; align-items: center; min-height: 38px; }
+.g-head { min-height: 22px; }
+.g-lab { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 0 4px; min-width: 0; font-size: 13px; }
+.g-lab small { color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.g-lab .pill { justify-self: end; }
+.g-track { position: relative; height: 30px; border-radius: 8px; background: color-mix(in srgb, var(--soft) 40%, transparent); }
+.g-line { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--line); }
+.g-lab .pdot { grid-row: 1; grid-column: 1; }
+.g-lab strong { grid-row: 1; grid-column: 2; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.g-lab .pill { grid-row: 1; grid-column: 3; }
+.g-lab small { grid-row: 2; grid-column: 2 / -1; }
+.g-head .g-track { background: none; height: 22px; }
+.g-axis span { position: absolute; top: 2px; transform: translateX(-2px); font-size: 11px; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.g-bar { position: absolute; top: 4px; bottom: 4px; border-radius: 6px; overflow: hidden; border: 1px solid var(--pc); padding: 0; font: inherit; color: var(--ink);
+  background: color-mix(in srgb, var(--pc) 22%, var(--panel)); display: flex; align-items: center; min-width: 8px; }
+button.g-bar { cursor: pointer; }
+button.g-bar:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+.g-fill { position: absolute; inset: 0 auto 0 0; background: var(--pc); opacity: .55; }
+.g-txt { position: relative; padding: 0 6px; font-size: 11px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.g-today { position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--bad); z-index: 1; border-radius: 1px; }
+.g-key { margin-top: 6px; display: flex; align-items: center; gap: 6px; }
+.g-today-key { width: 2px; height: 12px; background: var(--bad); display: inline-block; }
+.plan-tools { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; }
+.plan-tools p { margin: 4px 0 0; }
+.plan-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.plan-row select, .plan-row input { width: auto; max-width: 100%; }
+
+/* Operator roster */
+table.roster th, table.roster td { vertical-align: top; min-width: 120px; }
+table.roster thead th.today, table.roster td.today { background: color-mix(in srgb, var(--link) 10%, transparent); }
+table.roster tbody th { white-space: nowrap; }
+.ros-e { display: grid; gap: 1px; width: 100%; text-align: left; margin-bottom: 4px; padding: 5px 7px; border-radius: 8px; border: 1px solid var(--line-2);
+  border-left: 4px solid var(--sc); background: color-mix(in srgb, var(--sc) 12%, var(--panel)); color: var(--ink); font: inherit; font-size: 12px; cursor: pointer; }
+.ros-e small { color: var(--muted); font-size: 11px; }
+.ros-e.shift-day { --sc: var(--ring-2); } .ros-e.shift-night { --sc: var(--ring-3); } .ros-e.shift-overtime { --sc: var(--ring-4); }
+.ros-add { width: 100%; border: 1px dashed var(--line-2); background: transparent; color: var(--muted); border-radius: 8px; padding: 2px; cursor: pointer; font: inherit; }
+.ros-add:hover { color: var(--ink); border-color: var(--link); }
+@media (max-width: 860px) {
+  .g-row { grid-template-columns: 1fr; gap: 4px; }
+  .g-head .g-lab { display: none; }
+  .plan-tools { grid-template-columns: 1fr; }
+}

@@ -121,10 +121,11 @@ function buildDashboard(db) {
   // Progress of each open project per shop process (Job Traveller routing vs Operator output).
   const perProc = all(`
     SELECT j.project_id, p.id AS process_id, p.name, p.seq,
-      COALESCE(SUM(s.target_qty), 0) AS target, COALESCE(SUM(MIN(COALESCE(o.good, 0), COALESCE(s.target_qty, 0))), 0) AS good
+      COALESCE(SUM(s.target_qty), 0) AS target, COALESCE(SUM(MIN(COALESCE(o.good, 0), COALESCE(s.target_qty, 0))), 0) AS good,
+      COALESCE(SUM(o.reject), 0) AS reject
     FROM jt_steps s JOIN job_travellers j ON j.id = s.job_traveller_id AND j.status != 'Cancelled'
     JOIN shop_processes p ON p.id = s.process_id
-    LEFT JOIN (SELECT job_traveller_id, process_id, SUM(good_qty) AS good FROM operator_outputs GROUP BY job_traveller_id, process_id) o
+    LEFT JOIN (SELECT job_traveller_id, process_id, SUM(good_qty) AS good, SUM(reject_qty) AS reject FROM operator_outputs GROUP BY job_traveller_id, process_id) o
       ON o.job_traveller_id = s.job_traveller_id AND o.process_id = s.process_id
     WHERE j.project_id IS NOT NULL GROUP BY j.project_id, p.id ORDER BY p.seq`);
   const jtCounts = all(`SELECT project_id, status, COUNT(*) AS n FROM job_travellers WHERE project_id IS NOT NULL GROUP BY project_id, status`);
@@ -136,10 +137,23 @@ function buildDashboard(db) {
     const jts = Object.fromEntries(jtCounts.filter((c) => c.project_id === p.id).map((c) => [c.status, c.n]));
     return { ...p, target, good, completion: pct(good, target), processes: procs, job_travellers: jts };
   });
+  // Each shop process split by project, for the Production by process chart.
+  for (const pr of processes) {
+    pr.projects = perProc.filter((x) => x.process_id === pr.id).map((x) => {
+      const proj = projectProgress.find((p) => p.id === x.project_id);
+      return { code: proj ? proj.code : '?', target: x.target, good: x.good, reject: x.reject, completion: pct(x.good, x.target) };
+    });
+  }
+  // Planner's schedule lines that are not finished, for the schedule chart.
+  const schedules = all(`SELECT s.id, s.project_id, p.code AS project, s.process_id, sp.name AS process, sp.seq, m.code AS machine,
+      s.start_date, s.end_date, s.planned_qty, s.status
+    FROM schedules s JOIN projects p ON p.id = s.project_id JOIN shop_processes sp ON sp.id = s.process_id
+    LEFT JOIN machines m ON m.id = s.machine_id
+    WHERE s.status != 'Done' OR s.end_date >= date('now', '-7 day') ORDER BY p.code, sp.seq, s.start_date`);
 
   const recentNcrs = all('SELECT id, ncr_no, date, part_no, status FROM ncrs ORDER BY id DESC LIMIT 5');
 
-  return { kpi, production, processes, issues, projects, workflow, load, downtime, lowStock, plates, projectProgress, lowItems, recentNcrs, minutesPerDay: MINUTES_PER_DAY };
+  return { kpi, production, processes, issues, projects, workflow, load, downtime, lowStock, plates, projectProgress, schedules, lowItems, recentNcrs, minutesPerDay: MINUTES_PER_DAY };
 }
 
 module.exports = { buildDashboard, MINUTES_PER_DAY };

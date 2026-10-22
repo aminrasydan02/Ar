@@ -607,3 +607,34 @@ test('PM log by date: each check is dated, updates the checklist, and one item i
   assert.deepEqual([t.status, t.checked_on], ['Pass', '2026-10-20']);
   assert.equal((await call(admin, 'GET', `/api/pm_logs?machine_id=${task.machine_id}`)).data.length >= 1, true);
 });
+
+test('Planner schedules a project (manual and auto plan); Supervisor plans operators; both show on the dashboard', async () => {
+  const proj = (await call(admin, 'GET', '/api/projects')).data.find((p) => p.code === 'NEWAYS') || (await call(admin, 'GET', '/api/projects')).data[0];
+  const procs = (await call(admin, 'GET', '/api/shop_processes')).data;
+  let r = await call(admin, 'POST', '/api/schedules', { project_id: proj.id, process_id: procs[0].id, start_date: '2026-10-26', end_date: '2026-10-24' });
+  assert.equal(r.status, 400);
+  r = await call(admin, 'POST', '/api/schedules', { project_id: proj.id, process_id: procs[0].id, start_date: '2026-10-26', end_date: '2026-10-28' });
+  assert.equal(r.status, 201);
+  assert.equal(r.data.source, 'Manual');
+  r = await call(admin, 'POST', '/api/schedules/auto', { project_id: proj.id, start_date: '2026-10-24' });
+  assert.equal(r.status, 201);
+  const auto = r.data.filter((x) => x.source === 'Auto plan');
+  assert.ok(auto.length >= 1);
+  assert.ok(auto.every((x) => x.end_date >= x.start_date && new Date(`${x.start_date}T00:00:00Z`).getUTCDay() !== 0));
+  // Running it again replaces the auto lines and keeps the manual one.
+  r = await call(admin, 'POST', '/api/schedules/auto', { project_id: proj.id, start_date: '2026-10-24' });
+  assert.equal(r.data.filter((x) => x.source === 'Auto plan').length, auto.length);
+  assert.equal(r.data.filter((x) => x.source === 'Manual').length, 1);
+  // Operators may not plan the schedule.
+  const op = await login('operator1', 'operator123').catch(() => null);
+  if (op) assert.equal((await call(op, 'POST', '/api/schedules/auto', { project_id: proj.id })).status, 403);
+
+  const jt = (await call(admin, 'GET', '/api/job_travellers')).data.find((j) => j.project_id);
+  r = await call(admin, 'POST', '/api/shift_plans', { date: '2026-10-26', shift: 'Day', operator: 'Ali', process_id: procs[0].id, job_traveller_id: jt.id, planned_qty: 50 });
+  assert.equal(r.status, 201);
+  assert.equal(r.data.project_id, jt.project_id);
+
+  const dash = (await call(admin, 'GET', '/api/dashboard')).data;
+  assert.ok(dash.schedules.some((x) => x.project_id === proj.id));
+  assert.ok(Array.isArray(dash.processes[0].projects));
+});

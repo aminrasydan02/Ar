@@ -224,6 +224,42 @@ const resources = {
       { name: 'remarks', label: 'Remarks', type: 'text', list: false },
     ],
   },
+  // Planner's production schedule: when each process works on a project (or one Job Traveller).
+  schedules: {
+    label: 'Production schedule', singular: 'Schedule line', group: 'Planning', nav: false,
+    write: ['admin', 'planner'],
+    display: 'start_date',
+    fields: [
+      { name: 'project_id', label: 'Project', type: 'ref', ref: 'projects', required: true },
+      { name: 'process_id', label: 'Process', type: 'ref', ref: 'shop_processes', required: true },
+      { name: 'job_traveller_id', label: 'Job Traveller', type: 'ref', ref: 'job_travellers', help: 'Leave empty to plan the whole project at this process.' },
+      { name: 'machine_id', label: 'Machine', type: 'ref', ref: 'machines' },
+      { name: 'start_date', label: 'Start', type: 'date', required: true },
+      { name: 'end_date', label: 'End', type: 'date', required: true },
+      { name: 'planned_qty', label: 'Planned qty', type: 'number' },
+      { name: 'status', label: 'Status', type: 'select', options: ['Planned', 'In progress', 'Done', 'Delayed'], default: 'Planned' },
+      { name: 'source', label: 'Made by', type: 'text', readonly: true },
+      { name: 'notes', label: 'Notes', type: 'text', list: false },
+    ],
+  },
+  // Supervisor's operator plan: who works where, on which shift and day.
+  shift_plans: {
+    label: 'Operator roster', singular: 'Roster entry', group: 'Production', nav: false,
+    write: ['admin', 'planner'],
+    display: 'operator',
+    fields: [
+      { name: 'date', label: 'Date', type: 'date', required: true },
+      { name: 'shift', label: 'Shift', type: 'select', options: ['Day', 'Night', 'Overtime'], default: 'Day', required: true },
+      { name: 'operator', label: 'Operator', type: 'text', required: true },
+      { name: 'process_id', label: 'Process', type: 'ref', ref: 'shop_processes', required: true },
+      { name: 'machine_id', label: 'Machine', type: 'ref', ref: 'machines' },
+      { name: 'job_traveller_id', label: 'Job Traveller', type: 'ref', ref: 'job_travellers' },
+      { name: 'project_id', label: 'Project', type: 'ref', ref: 'projects', readonly: true, help: 'Taken from the Job Traveller.' },
+      { name: 'planned_qty', label: 'Target qty', type: 'number' },
+      { name: 'hours', label: 'Hours', type: 'number', default: 7.75 },
+      { name: 'notes', label: 'Notes', type: 'text', list: false },
+    ],
+  },
   // One line per PM item checked on a date, so each machine keeps a dated care record.
   pm_logs: {
     label: 'PM log', singular: 'PM check', group: 'Engineering',
@@ -425,6 +461,7 @@ const OWNERS = {
   inventory_items: ['Technician', 'Supervisor'],
   pm_tasks: ['Technician', 'Supervisor'], pm_logs: ['Technician', 'Supervisor', 'Operator'],
   nesting_parts: ['Planner', 'Engineer'],
+  schedules: ['Planner'], shift_plans: ['Supervisor'],
 };
 for (const [name, list] of Object.entries(OWNERS)) resources[name].processes = list;
 
@@ -432,7 +469,7 @@ for (const [name, list] of Object.entries(OWNERS)) resources[name].processes = l
 const SLICERS = {
   projects: ['status', 'customer'], parts: ['project_id', 'make_buy'], nestings: ['project_id', 'material'], nesting_parts: ['nesting_id'],
   routings: ['machine_id'], wf_steps: ['status'], machines: ['machine_type', 'brand'], tooling: ['tool_type', 'machine_type'],
-  plates: ['project_id', 'material'], drawings: ['project_id', 'kind'], maint_orders: ['machine_id', 'kind'], pm_tasks: ['machine_id', 'frequency'], pm_logs: ['machine_id', 'result'],
+  plates: ['project_id', 'material'], drawings: ['project_id', 'kind'], maint_orders: ['machine_id', 'kind'], pm_tasks: ['machine_id', 'frequency'], pm_logs: ['machine_id', 'result'], schedules: ['project_id', 'process_id'], shift_plans: ['project_id', 'process_id'],
   ncrs: ['project_id', 'status'], reason_codes: ['kind'], job_travellers: ['project_id', 'status'], operator_outputs: ['project_id', 'process_id'],
   daily_logs: ['project_id', 'process'], inventory_items: ['item_group', 'status'], inventory_moves: ['move'], issues: ['to_process', 'status'],
 };

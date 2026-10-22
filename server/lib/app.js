@@ -7,7 +7,7 @@ const { ROLES, can, rightsFor, canApprove, canEditLayout, setProcessRights } = r
 const { checkLayout, starterLayout } = require('./layout');
 const auth = require('./auth');
 const { FORMATS, MODEL_FORMATS, MIME, parseDrawingName, safeFilename, checkContent } = require('./drawings');
-const { buildDashboard } = require('./dashboard');
+const { buildDashboard, MINUTES_PER_DAY } = require('./dashboard');
 const { readJobTravellers } = require('./jtimport');
 const templates = require('./templates');
 
@@ -217,6 +217,11 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
   // Fields copied from a linked record: project from the Job Traveller, machine type from the machine.
   function linkFields(name, data, current = {}) {
     const v = (k) => (k in data ? data[k] : current[k]);
+    if (name === 'schedules' && v('start_date') && v('end_date') && v('end_date') < v('start_date')) throw new HttpError(400, 'End date is before the start date');
+    if (name === 'shift_plans') {
+      const jt = v('job_traveller_id') ? db.prepare('SELECT project_id FROM job_travellers WHERE id = ?').get(v('job_traveller_id')) : null;
+      data.project_id = jt ? jt.project_id : null;
+    }
     if (name === 'operator_outputs' && v('job_traveller_id')) {
       const jt = db.prepare('SELECT project_id FROM job_travellers WHERE id = ?').get(v('job_traveller_id'));
       data.project_id = jt ? jt.project_id : null;
@@ -283,6 +288,7 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
     }
     if (name === 'daily_logs') data.logged_by = user.username;
     if (name === 'operator_outputs') data.operator = user.username;
+    if (name === 'schedules') data.source = 'Manual';
     if (name === 'pm_logs') {
       data.checked_by = user.username;
       if (db.prepare('SELECT 1 FROM pm_logs WHERE pm_task_id = ? AND date = ?').get(data.pm_task_id, data.date)) {
@@ -362,6 +368,52 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
       lines.push([r.id, ...fields.map((f) => (f.type === 'ref' ? r[`${f.name}__label`] : r[f.name]))].map(esc).join(','));
     }
     return '﻿' + lines.join('\r\n') + '\r\n';
+  }
+
+  // ---- schedule ------------------------------------------------------------
+
+  // Auto plan: one line per shop process in the project's Job Traveller routing. Days come from the
+  // remaining work (pcs x cycle time / net minutes a day, at least 1). Each process starts one working
+  // day after the one before it, so parts flow on while the first process is still busy. Sundays are off.
+  const PROCESS_MACHINE = { LASER: 'Fiber laser', POLISH: 'Polishing/grinding', BEND: 'Press brake', CLINCH: 'Clinching/PEM press', WELD: 'Welding' };
+  function workDay(iso, n) {
+    let d = new Date(`${iso}T00:00:00Z`);
+    const step = () => { d = new Date(d.getTime() + 86400000); };
+    while (d.getUTCDay() === 0) step();
+    for (let i = 0; i < n; i++) { step(); while (d.getUTCDay() === 0) step(); }
+    return d.toISOString().slice(0, 10);
+  }
+  function autoPlan(body, user) {
+    allow(user, 'create', 'schedules');
+    const projectId = Number(body.project_id);
+    const project = db.prepare('SELECT id, code FROM projects WHERE id = ?').get(projectId);
+    if (!project) throw new HttpError(400, 'Project not found');
+    const start = /^\d{4}-\d{2}-\d{2}$/.test(body.start_date || '') ? body.start_date : localToday();
+    const rows = db.prepare(`
+      SELECT p.id, p.code, p.name, p.seq, SUM(COALESCE(s.target_qty, 0)) AS qty,
+        SUM(MAX(COALESCE(s.target_qty, 0) - COALESCE(o.good, 0), 0) * COALESCE(s.cycle_min, 0)) AS min
+      FROM jt_steps s JOIN job_travellers j ON j.id = s.job_traveller_id AND j.project_id = ? AND j.status NOT IN ('Completed','Cancelled')
+      JOIN shop_processes p ON p.id = s.process_id
+      LEFT JOIN (SELECT job_traveller_id, process_id, SUM(good_qty) AS good FROM operator_outputs GROUP BY job_traveller_id, process_id) o
+        ON o.job_traveller_id = s.job_traveller_id AND o.process_id = s.process_id
+      GROUP BY p.id ORDER BY p.seq`).all(projectId);
+    if (!rows.length) throw new HttpError(400, 'This project has no Job Traveller routing to plan from');
+    db.exec('BEGIN');
+    try {
+      db.prepare("DELETE FROM schedules WHERE project_id = ? AND source = 'Auto plan' AND status = 'Planned'").run(projectId);
+      const ins = db.prepare(`INSERT INTO schedules (project_id, process_id, machine_id, start_date, end_date, planned_qty, status, source, notes)
+        VALUES (?, ?, ?, ?, ?, ?, 'Planned', 'Auto plan', ?)`);
+      rows.forEach((r, i) => {
+        const days = Math.max(1, Math.ceil((r.min || 0) / MINUTES_PER_DAY));
+        const from = workDay(start, i);
+        const machines = db.prepare('SELECT id FROM machines WHERE machine_type = ?').all(PROCESS_MACHINE[r.code] || '');
+        ins.run(projectId, r.id, machines.length === 1 ? machines[0].id : null, from, workDay(from, days - 1), r.qty,
+          r.min ? `${Math.round(r.min)} min of work` : 'No cycle time in routing: check the days');
+      });
+      db.exec('COMMIT');
+    } catch (err) { db.exec('ROLLBACK'); throw err; }
+    audit(user, 'auto-plan', 'schedules', projectId);
+    return listRecords('schedules', new URLSearchParams({ project_id: String(projectId) }));
   }
 
   // ---- drawings -----------------------------------------------------------
@@ -866,6 +918,7 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
       if (user.role !== 'admin') throw new HttpError(403, 'Only Admin can view the audit log');
       return send(res, 200, db.prepare('SELECT * FROM audit ORDER BY id DESC LIMIT 500').all());
     }
+    if (parts[0] === 'schedules' && parts[1] === 'auto' && method === 'POST') return send(res, 201, autoPlan(await readJson(req), user));
     if (parts[0] === 'drawings' && parts[1] === 'upload' && method === 'POST') {
       return send(res, 201, await uploadDrawing(req, url, user));
     }

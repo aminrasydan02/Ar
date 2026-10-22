@@ -228,10 +228,10 @@ function projectPanel(code, n) {
 }
 const daysBetweenIso = (a, b) => Math.round((Date.parse(`${b}T00:00:00Z`) - Date.parse(`${a}T00:00:00Z`)) / 86400000);
 
-function recordTable(resName, { filter = {}, extra = [], rowActions, columns, onRow, slicerSlot, noneLabel, onLoad } = {}) {
+function recordTable(resName, { filter = {}, extra = [], rowActions, columns, onRow, slicerSlot, noneLabel, onLoad, skipSlicers = [] } = {}) {
   const res = state.meta.resources[resName];
   const fields = res.fields.filter((f) => f.list !== false && (!columns || columns.includes(f.name)));
-  const slicers = (res.slicers || []).filter((n) => !(n in filter)).map((n) => res.fields.find((f) => f.name === n)).filter(Boolean);
+  const slicers = (res.slicers || []).filter((n) => !(n in filter) && !skipSlicers.includes(n)).map((n) => res.fields.find((f) => f.name === n)).filter(Boolean);
   const picked = {};
   const wrap = h('div');
   const search = h('input', { type: 'search', placeholder: `Search ${res.label.toLowerCase()}…` });
@@ -378,6 +378,122 @@ function viewSwitch() {
     [['cockpit', 'Cockpit'], ['classic', 'Classic']].map(([m, l]) => h('button', { type: 'button', class: mode === m ? 'on' : '', 'aria-pressed': String(mode === m), onclick: () => pick(m) }, l)));
 }
 
+// A bubble for any slicer: colour, title, two lines of detail and a value.
+function bubble({ title, sub, small, colour, n }, on, onclick) {
+  const b = h('button', { type: 'button', class: `pbub${on ? ' on' : ''}`, 'aria-pressed': String(on), onclick },
+    dot(colour), h('span', { class: 'pbub-t' }, h('strong', {}, title), sub ? h('span', { class: 'pbub-name' }, sub) : null, small ? h('small', {}, small) : null),
+    n !== undefined ? h('span', { class: 'n' }, n) : null);
+  b.style.setProperty('--pc', colour);
+  return b;
+}
+const PROC_COLOURS = ['var(--ring-3)', 'var(--ring-2)', 'var(--ring-4)', 'var(--ring-1)', 'var(--link)', 'var(--ok)'];
+
+// Production by process: bubbles pick a process; "All" compares processes, one process shows each project.
+function processCard(processes, minutesPerDay, cardClass) {
+  const card = h('section', { class: cardClass });
+  let pick = '';
+  try { pick = localStorage.getItem('smm-dash-proc') || ''; } catch (e) { /* storage blocked */ }
+  const colour = (name) => PROC_COLOURS[Math.max(0, processes.findIndex((x) => x.name === name)) % PROC_COLOURS.length];
+  function draw() {
+    const p = processes.find((x) => x.name === pick);
+    if (!p) pick = '';
+    const set = (name) => () => { pick = pick === name ? '' : name; try { localStorage.setItem('smm-dash-proc', pick); } catch (e) { /* storage blocked */ } draw(); };
+    const bubbles = h('div', { class: 'pbubs' },
+      h('button', { type: 'button', class: `chip${!pick ? ' on' : ''}`, 'aria-pressed': String(!pick), onclick: set('') }, 'All processes', h('span', { class: 'n' }, processes.length)),
+      processes.map((x) => bubble({ title: x.name, small: `${fmtNum(x.remaining_days)} day(s) left${x.bottleneck ? ' · bottleneck' : ''}`, colour: colour(x.name), n: fmtPct(x.completion) }, pick === x.name, set(x.name))));
+    let chart;
+    if (!p) {
+      chart = processes.length ? h('div', { class: 'hbars', role: 'list' }, processes.map((x) => {
+        const fill = h('div', { class: 'hbar-f' }); fill.style.width = `${Math.min(100, x.completion)}%`; fill.style.background = colour(x.name);
+        return h('button', { type: 'button', class: 'hbar', role: 'listitem', onclick: set(x.name), 'aria-label': `${x.name} ${fmtPct(x.completion)}` },
+          h('div', { class: 'hbar-l' }, dot(colour(x.name)), h('strong', {}, x.name, x.bottleneck ? [' ', h('span', { class: 'pill bad' }, 'Bottleneck')] : null), h('small', {}, `${x.steps} routing step(s)`)),
+          h('div', { class: 'hbar-t' }, fill),
+          h('div', { class: 'hbar-v' }, h('strong', {}, fmtPct(x.completion)), h('small', {}, `${fmtNum(x.good)}/${fmtNum(x.target)} pcs · ${fmtNum(x.remaining_days)}d left`)));
+      })) : h('div', { class: 'empty' }, 'No Job Traveller routing yet.');
+    } else {
+      const projs = p.projects || [];
+      const stat = (l, v) => h('div', {}, h('small', {}, l), h('strong', {}, v));
+      chart = [h('div', { class: 'pstats' },
+        stat('Completion', fmtPct(p.completion)), stat('Good / target', `${fmtNum(p.good)} / ${fmtNum(p.target)} pcs`), stat('Reject', fmtNum(p.reject)),
+        stat('Yield', fmtPct(p.yield)), stat('Work left', `${fmtNum(p.remaining_min / 60, 1)} h · ${fmtNum(p.remaining_days)} day(s)`),
+        p.bottleneck ? h('div', {}, h('small', {}, 'Flow'), h('span', { class: 'pill bad' }, 'Bottleneck')) : null),
+      projs.length ? h('div', { class: 'vchart', role: 'img', 'aria-label': projs.map((x) => `${x.code} ${fmtPct(x.completion)}`).join(', ') },
+        h('div', { class: 'vgrid', 'aria-hidden': 'true' }, ['100%', '75%', '50%', '25%', '0%'].map((t) => h('span', {}, t))),
+        h('div', { class: 'vcols' }, projs.map((x) => {
+          const bar = h('div', { class: 'vbar' }); bar.style.height = `${Math.min(100, x.completion)}%`; bar.style.background = projectColour(x.code);
+          return h('div', { class: 'vcol' }, h('div', { class: 'vval' }, fmtPct(x.completion)), h('div', { class: 'vtrack' }, bar),
+            h('div', { class: 'vlab' }, h('strong', {}, x.code), h('small', {}, `${fmtNum(x.good)}/${fmtNum(x.target)}${x.reject ? ` · ${fmtNum(x.reject)} rej` : ''}`)));
+        }))) : h('div', { class: 'empty' }, 'No project has routing at this process.')];
+    }
+    card.replaceChildren(
+      h('div', { class: 'dcard-h' }, h('span', { class: 'dcard-i' }, icon('pulse')), h('h2', {}, p ? `Production by process · ${p.name}` : `Production by process`),
+        h('span', { class: 'muted small' }, `net ${minutesPerDay} min/day`)),
+      h('div', { class: 'slicer proj' }, h('span', { class: 'slicer-l' }, 'Process'), bubbles), ...[chart].flat().filter(Boolean));
+  }
+  draw();
+  return card;
+}
+
+// Gantt chart of schedule lines. With no project picked, each project is one bar from first start to last end.
+function gantt(lines, { project, progress = [], onPick } = {}) {
+  const today = localToday();
+  const rows = project ? lines.filter((l) => l.project === project).map((l) => ({
+    key: l.id, label: l.process, sub: [l.machine, l.planned_qty ? `${fmtNum(l.planned_qty)} pcs` : null].filter(Boolean).join(' · '),
+    start: l.start_date, end: l.end_date, colour: projectColour(l.project), status: l.status,
+    done: ((progress.find((p) => p.code === l.project) || { processes: [] }).processes.find((x) => x.name === l.process) || {}).completion || 0,
+  })) : [...new Set(lines.map((l) => l.project))].map((code) => {
+    const ls = lines.filter((l) => l.project === code);
+    return { key: code, label: code, sub: (projectOf(code) || {}).name || '', start: ls.reduce((a, l) => (l.start_date < a ? l.start_date : a), ls[0].start_date),
+      end: ls.reduce((a, l) => (l.end_date > a ? l.end_date : a), ls[0].end_date), colour: projectColour(code), status: `${ls.length} line(s)`,
+      done: (progress.find((p) => p.code === code) || {}).completion || 0, pick: code };
+  });
+  if (!rows.length) return h('div', { class: 'empty' }, project ? 'Nothing planned for this project yet.' : 'No schedule yet. The Planner makes it on the Production schedule page.');
+  let from = rows.reduce((a, r) => (r.start < a ? r.start : a), today), to = rows.reduce((a, r) => (r.end > a ? r.end : a), today);
+  from = addDays(from, -1); to = addDays(to, 1);
+  const span = daysBetween(from, to) + 1;
+  const pos = (iso) => (daysBetween(from, iso) / span) * 100;
+  const ticks = [];
+  for (let d = from; d <= to; d = addDays(d, 1)) if (span <= 21 || new Date(`${d}T00:00:00Z`).getUTCDay() === 1) ticks.push(d);
+  const axis = h('div', { class: 'g-axis' }, ticks.map((d) => { const t = h('span', {}, `${d.slice(8)}/${d.slice(5, 7)}`); t.style.left = `${pos(d)}%`; return t; }));
+  const todayLine = () => { const t = h('div', { class: 'g-today', title: `Today ${fmtDate(today)}` }); t.style.left = `${pos(today)}%`; return t; };
+  const gridLines = () => ticks.map((d) => { const l = h('span', { class: 'g-line', 'aria-hidden': 'true' }); l.style.left = `${pos(d)}%`; return l; });
+  return h('div', { class: 'gantt' },
+    h('div', { class: 'g-row g-head' }, h('div', { class: 'g-lab' }), h('div', { class: 'g-track' }, axis)),
+    rows.map((r) => {
+      const bar = h(r.pick && onPick ? 'button' : 'div', { class: 'g-bar', type: r.pick && onPick ? 'button' : null, onclick: r.pick && onPick ? () => onPick(r.pick) : null,
+        title: `${r.label}: ${fmtDate(r.start)} to ${fmtDate(r.end)} · ${fmtPct(r.done)} done` },
+        h('span', { class: 'g-fill' }), h('span', { class: 'g-txt' }, `${fmtDate(r.start).slice(0, 5)}–${fmtDate(r.end).slice(0, 5)} · ${fmtPct(r.done)}`));
+      bar.style.left = `${pos(r.start)}%`; bar.style.width = `${Math.max(1.5, ((daysBetween(r.start, r.end) + 1) / span) * 100)}%`;
+      bar.style.setProperty('--pc', r.colour); bar.firstChild.style.width = `${Math.min(100, r.done)}%`;
+      const late = r.end < today && r.done < 100;
+      return h('div', { class: 'g-row' }, h('div', { class: 'g-lab' }, dot(r.colour), h('strong', {}, r.label), r.sub ? h('small', {}, r.sub) : null,
+        late ? h('span', { class: 'pill bad' }, 'Late') : r.status && STATUS_CLASS[r.status] !== undefined ? pill(r.status) : null),
+        h('div', { class: 'g-track' }, gridLines(), todayLine(), bar));
+    }),
+    h('div', { class: 'g-key muted small' }, h('span', { class: 'g-today-key' }), ' Today · filled part of a bar = work done'));
+}
+
+// Dashboard card: schedule by project, with the project bubbles.
+function scheduleCard(lines, progress, cardClass) {
+  const card = h('section', { class: cardClass });
+  let pick = '';
+  try { pick = localStorage.getItem('smm-dash-plan') || ''; } catch (e) { /* storage blocked */ }
+  const codes = [...new Set(lines.map((l) => l.project))];
+  function draw() {
+    if (!codes.includes(pick)) pick = '';
+    const set = (code) => { pick = pick === code ? '' : code; try { localStorage.setItem('smm-dash-plan', pick); } catch (e) { /* storage blocked */ } draw(); };
+    const late = (code) => lines.filter((l) => l.project === code && l.end_date < localToday() && l.status !== 'Done').length;
+    card.replaceChildren(
+      h('div', { class: 'dcard-h' }, h('span', { class: 'dcard-i' }, icon('gantt')), h('h2', {}, pick ? `Schedule · ${pick}` : 'Schedule by project'), h('a', { href: '#/plan' }, 'Production schedule')),
+      codes.length ? h('div', { class: 'slicer proj' }, h('span', { class: 'slicer-l' }, 'Project'), h('div', { class: 'pbubs' },
+        h('button', { type: 'button', class: `chip${!pick ? ' on' : ''}`, 'aria-pressed': String(!pick), onclick: () => set('') }, 'All projects', h('span', { class: 'n' }, codes.length)),
+        codes.map((c) => projectBubble(c, late(c) ? `${late(c)} late` : `${lines.filter((l) => l.project === c).length} lines`, pick === c, () => set(c))))) : null,
+      gantt(lines, { project: pick || null, progress, onPick: set }));
+  }
+  draw();
+  return card;
+}
+
 // Project progress chart: bubbles pick a project; "All" compares projects, one project shows each process.
 function projectProgressCard(list, cardClass) {
   const card = h('section', { class: cardClass });
@@ -430,6 +546,7 @@ function projectProgressCard(list, cardClass) {
 
 async function viewDashboard() {
   const d = await api('GET', '/api/dashboard');
+  projCache = d.projectProgress;
   if (dashMode() === 'cockpit') return viewCockpit(d);
   const k = d.kpi, pr = d.production;
   const stat = (ic, value, label, note, tone) => h('div', { class: `stat ${tone || ''}` }, h('span', { class: 'stat-i' }, icon(ic)),
@@ -440,17 +557,6 @@ async function viewDashboard() {
     h('thead', {}, h('tr', {}, heads.map((t, i) => h('th', { class: nums.includes(i) ? 'num' : '' }, t)))),
     h('tbody', {}, rows)));
   const empty = (t) => h('div', { class: 'empty' }, t);
-  const colours = ['var(--ring-1)', 'var(--ring-2)', 'var(--ring-3)', 'var(--ring-4)'];
-
-  const processBars = d.processes.map((p, i) => {
-    const v = Math.min(100, p.completion), col = colours[i % 4];
-    const fill = h('div', { class: 'fill' }); fill.style.width = `${v}%`; fill.style.background = col;
-    return h('div', { class: 'pbar' },
-      h('div', { class: 'pbar-t' }, h('strong', {}, p.name), p.bottleneck ? h('span', { class: 'pill bad' }, 'Bottleneck') : null,
-        h('span', { class: 'grow' }), h('span', { class: 'muted' }, `${fmtNum(p.good)} / ${fmtNum(p.target)} pcs · ${fmtNum(p.remaining_days)} day(s) left`), h('b', {}, fmtPct(p.completion))),
-      h('div', { class: 'track', role: 'meter', 'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-valuenow': v, 'aria-label': `${p.name} completion` }, fill));
-  });
-
   return [
     pageHead('Dashboard', 'grid', `${fmtDate(localToday())} · net ${d.minutesPerDay} working min/day`, viewSwitch()),
     h('div', { class: 'stat-grid' },
@@ -462,7 +568,8 @@ async function viewDashboard() {
       stat('gear', fmtNum(k.machines_down), 'Machines down', `${fmtNum(k.open_work_orders)} open maintenance`, k.machines_down ? 'alert' : 't2')),
     h('div', { class: 'dgrid' },
       projectProgressCard(d.projectProgress, 'dcard wide'),
-      dcard('Production by process', 'pulse', processBars.length ? processBars : empty('No Job Traveller routing yet.'), ['#/r/job_travellers', 'Job Travellers'], true),
+      processCard(d.processes, d.minutesPerDay, 'dcard wide'),
+      scheduleCard(d.schedules, d.projectProgress, 'dcard wide'),
       dcard('Projects', 'folder', d.projects.length ? table(['Project', 'Due', 'Status', 'Progress'], d.projects.map((p) => {
         const pct = p.steps ? Math.round((p.steps_done / p.steps) * 100) : 0;
         const bar = h('div'); bar.style.width = `${pct}%`;
@@ -495,6 +602,90 @@ async function viewDashboard() {
           h('td', { class: 'num' }, `${fmtNum(i.qty_on_hand)} ${i.unit || ''}`), h('td', { class: 'num' }, fmtNum(i.min_qty)), h('td', {}, pill(i.status))))], [2, 3]),
         ['#/r/inventory_items', 'Inventory'], true) : null),
   ];
+}
+
+// ---------- Planner: production schedule ----------------------------------------
+
+async function viewPlan() {
+  const [lines, projects, dash] = await Promise.all([api('GET', '/api/schedules'), api('GET', '/api/projects'), api('GET', '/api/dashboard')]);
+  projCache = projects;
+  const qs = new URLSearchParams(location.hash.split('?')[1] || '');
+  const pick = qs.get('project') || '';
+  const flat = lines.map((l) => ({ id: l.id, project: l.project_id__label, process: l.process_id__label, machine: l.machine_id__label,
+    start_date: l.start_date, end_date: l.end_date, planned_qty: l.planned_qty, status: l.status }));
+  const head = pageHead('Production schedule', 'gantt', 'Planner plans when each process works on each project');
+  const codes = projects.filter((p) => !['Completed', 'Cancelled'].includes(p.status)).map((p) => p.code);
+  const go = (code) => { location.hash = code && code !== pick ? `#/plan?project=${encodeURIComponent(code)}` : '#/plan'; };
+  head.append(h('div', { class: 'slicers' }, h('div', { class: 'slicer proj' }, h('span', { class: 'slicer-l' }, 'Project'),
+    h('div', { class: 'pbubs' }, h('button', { type: 'button', class: `chip${!pick ? ' on' : ''}`, onclick: () => go('') }, 'All projects', h('span', { class: 'n' }, codes.length)),
+      codes.map((c) => projectBubble(c, `${flat.filter((l) => l.project === c).length} lines`, pick === c, () => go(c)))),
+    pick ? projectPanel(pick, flat.filter((l) => l.project === pick).length) : null)));
+  const pickProject = projects.find((p) => p.code === pick);
+  let tools = null;
+  if (right('schedules', 'create')) {
+    const projSel = h('select', { 'aria-label': 'Project to plan' }, projects.filter((p) => !['Completed', 'Cancelled'].includes(p.status)).map((p) =>
+      h('option', { value: p.id, selected: pickProject && p.id === pickProject.id }, `${p.code} · ${p.name}`)));
+    const startIn = h('input', { type: 'date', value: localToday(), 'aria-label': 'Plan start date' });
+    tools = h('div', { class: 'panel plan-tools' },
+      h('div', {}, h('strong', {}, 'Auto plan from Job Traveller routing'),
+        h('p', { class: 'muted small' }, 'Makes one line per process. Days = work left (pcs × cycle time ÷ 465 min), at least 1. Each process starts one working day after the one before. Sundays are off. Lines you entered yourself are kept; you can move any line after.')),
+      h('div', { class: 'plan-row' }, projSel, startIn, h('button', { class: 'btn primary', onclick: async () => {
+        try { const r = await api('POST', '/api/schedules/auto', { project_id: Number(projSel.value), start_date: startIn.value }); toast(`${r.filter((x) => x.source === 'Auto plan').length} line(s) planned`); route(); }
+        catch (e) { toast(e.message, true); }
+      } }, 'Auto plan')));
+  }
+  const table = recordTable('schedules', { filter: pickProject ? { project_id: pickProject.id } : {}, skipSlicers: ['project_id'] });
+  return [head, tools,
+    h('section', { class: 'dcard gap-top' }, h('div', { class: 'dcard-h' }, h('span', { class: 'dcard-i' }, icon('gantt')), h('h2', {}, pick ? `Timeline · ${pick}` : 'Timeline, all projects')),
+      gantt(flat, { project: pick || null, progress: dash.projectProgress, onPick: go })),
+    h('h2', {}, 'Schedule lines'), table];
+}
+
+// ---------- Supervisor: operator roster ------------------------------------------
+
+async function viewRoster() {
+  const qs = new URLSearchParams(location.hash.split('?')[1] || '');
+  const base = qs.get('week') || localToday();
+  const dow = (new Date(`${base}T00:00:00Z`).getUTCDay() + 6) % 7;
+  const monday = addDays(base, -dow);
+  const days = Array.from({ length: 7 }, (_, i) => addDays(monday, i));
+  const [all, procs] = await Promise.all([api('GET', '/api/shift_plans'), api('GET', '/api/shop_processes')]);
+  const proc = qs.get('process') || '';
+  const week = all.filter((r) => r.date >= days[0] && r.date <= days[6] && (!proc || String(r.process_id) === proc));
+  const operators = [...new Set(all.map((r) => r.operator))].sort();
+  const go = (ch) => { const n = new URLSearchParams({ week: monday, ...(proc ? { process: proc } : {}), ...ch }); for (const [k, v] of [...n]) if (!v) n.delete(k); location.hash = `#/roster?${n}`; };
+  const canPlan = right('shift_plans', 'create');
+  const add = (date, operator) => editRecord('shift_plans', null, { date, operator, ...(proc ? { process_id: Number(proc) } : {}) }, () => route());
+
+  const head = pageHead('Operator roster', 'users', `Week of ${fmtDate(days[0])} to ${fmtDate(days[6])}`,
+    h('button', { class: 'btn', onclick: () => go({ week: addDays(monday, -7) }) }, '‹ Previous week'),
+    h('button', { class: 'btn', onclick: () => go({ week: localToday() }) }, 'This week'),
+    h('button', { class: 'btn', onclick: () => go({ week: addDays(monday, 7) }) }, 'Next week ›'));
+  const inWeek = all.filter((r) => r.date >= days[0] && r.date <= days[6]);
+  head.append(h('div', { class: 'slicers' }, h('div', { class: 'slicer' }, h('span', { class: 'slicer-l' }, 'Process'),
+    h('div', { class: 'chips' }, h('button', { type: 'button', class: `chip${!proc ? ' on' : ''}`, onclick: () => go({ process: '' }) }, 'All', h('span', { class: 'n' }, inWeek.length)),
+      procs.map((p) => h('button', { type: 'button', class: `chip${proc === String(p.id) ? ' on' : ''}`, onclick: () => go({ process: proc === String(p.id) ? '' : String(p.id) }) },
+        p.name, h('span', { class: 'n' }, inWeek.filter((r) => r.process_id === p.id).length)))))));
+
+  const today = localToday();
+  const entry = (r) => h('button', { type: 'button', class: `ros-e shift-${r.shift.toLowerCase()}`, onclick: () => editRecord('shift_plans', r, null, () => route()),
+    title: `${r.operator} · ${r.shift} · ${r.process_id__label}${r.machine_id__label ? ` · ${r.machine_id__label}` : ''}` },
+    h('strong', {}, r.process_id__label), h('small', {}, [r.shift, r.machine_id__label, r.job_traveller_id__label].filter(Boolean).join(' · ')),
+    r.planned_qty ? h('small', {}, `${fmtNum(r.planned_qty)} pcs · ${fmtNum(r.hours)} h`) : null);
+  const people = proc ? [...new Set(week.map((r) => r.operator))].sort() : operators;
+  const grid = people.length ? h('div', { class: 'table-wrap' }, h('table', { class: 'roster' },
+    h('thead', {}, h('tr', {}, h('th', {}, 'Operator'), days.map((d) => h('th', { class: d === today ? 'today' : '' },
+      new Date(`${d}T00:00:00Z`).toLocaleDateString('en-MY', { weekday: 'short', timeZone: 'UTC' }), h('br'), `${d.slice(8)}/${d.slice(5, 7)}`)))),
+    h('tbody', {}, people.map((op) => h('tr', {}, h('th', {}, op), days.map((d) => {
+      const es = week.filter((r) => r.operator === op && r.date === d);
+      return h('td', { class: d === today ? 'today' : '' }, es.map(entry), canPlan ? h('button', { type: 'button', class: 'ros-add', 'aria-label': `Add ${op} on ${fmtDate(d)}`, onclick: () => add(d, op) }, '+') : null);
+    })))),
+    h('tfoot', {}, h('tr', {}, h('th', {}, 'Hours'), days.map((d) => h('td', { class: 'num' }, fmtNum(week.filter((r) => r.date === d).reduce((n, r) => n + (r.hours || 0), 0), 1))))))) :
+    h('div', { class: 'empty' }, 'No operators planned yet. Press "+ Plan operator" to add the first one.');
+  return [head,
+    canPlan ? h('div', { class: 'toolbar' }, h('span', { class: 'grow' }), h('button', { class: 'btn primary', onclick: () => add(today >= days[0] && today <= days[6] ? today : days[0], '') }, '+ Plan operator')) : null,
+    grid,
+    h('p', { class: 'muted small' }, 'Click an entry to change it. Day, Night and Overtime shifts have their own colour.')];
 }
 
 // ---------- PM check by date ---------------------------------------------------
@@ -628,12 +819,13 @@ const ICONS = {
   user: 'M12 12a4 4 0 1 0 0-8a4 4 0 0 0 0 8z M4 21a8 8 0 0 1 16 0',
   search: 'M11 4a7 7 0 1 0 .01 0 M20 20l-4-4',
   pulse: 'M3 12h4l3-7 4 14 3-7h4',
+  gantt: 'M4 3v18h17 M7 7h7 M10 11h8 M8 15h6',
   board: 'M4 4h4v16H4z M10 4h4v10h-4z M16 4h4v6h-4z',
 };
 // The icon shown beside each page title.
 const PAGE_ICONS = {
   projects: 'folder', parts: 'box', routings: 'route', nestings: 'nest', nesting_parts: 'nest', wf_steps: 'flow', machines: 'gear', tooling: 'wrench',
-  plates: 'layers', drawings: 'draw', maint_orders: 'wrench', pm_tasks: 'clip', pm_logs: 'cal', pm: 'clip', ncrs: 'alert', reason_codes: 'tag', job_travellers: 'jt', jt_steps: 'jt',
+  plates: 'layers', drawings: 'draw', maint_orders: 'wrench', pm_tasks: 'clip', pm_logs: 'cal', pm: 'clip', schedules: 'gantt', plan: 'gantt', shift_plans: 'users', roster: 'users', ncrs: 'alert', reason_codes: 'tag', job_travellers: 'jt', jt_steps: 'jt',
   operator_outputs: 'form', daily_logs: 'cal', inventory_items: 'box', inventory_moves: 'list', issues: 'chat', shop_processes: 'pulse',
   '': 'grid', daily: 'board', issue: 'chat', jt: 'jt', operator: 'form', find: 'search', layout: 'layout', 'project-new': 'plus', project: 'folder',
   ncr: 'alert', users: 'users', audit: 'clock', rights: 'shield', account: 'user', nesting: 'nest',
@@ -748,13 +940,8 @@ async function viewCockpit(d) {
       h('div', { class: 'ck-actions' }, h('a', { class: 'btn', href: `#/jt/${nextJt.id}` }, 'Open'),
         right('job_travellers', 'approve') ? h('a', { class: 'btn grad', href: `#/jt/${nextJt.id}` }, 'Review and approve') : null)]
       : h('p', { class: 'muted' }, 'Every Job Traveller is approved.')),
-    card('Completion by process', d.processes.map((p, i) => {
-      const v = Math.min(100, p.completion), col = colours[i % 4];
-      const fill = h('div', { class: 'fill' }), knob = h('div', { class: 'knob' });
-      fill.style.width = `${v}%`; fill.style.background = col; knob.style.left = `${v}%`; knob.style.background = col;
-      return h('div', { class: 'ck-bar' }, h('div', { class: 'row' }, h('span', {}, p.name, p.bottleneck ? [' ', h('span', { class: 'pill bad' }, 'Bottleneck')] : null), h('b', {}, fmtPct(p.completion))),
-        h('div', { class: 'track', role: 'meter', 'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-valuenow': v, 'aria-label': `${p.name} completion` }, fill, knob));
-    })),
+    processCard(d.processes, d.minutesPerDay, 'ck-card wide'),
+    scheduleCard(d.schedules, d.projectProgress, 'ck-card wide'),
     card('Job Traveller status', donut([
       { label: 'Planned', n: count('Planned'), colour: colours[2] }, { label: 'In progress', n: count('In progress'), colour: colours[3] },
       { label: 'Completed', n: count('Completed'), colour: colours[1] }, { label: 'On hold', n: count('On hold'), colour: colours[0] }])));
@@ -1689,8 +1876,9 @@ function renderShell() {
   }
   groups.Engineering = [['#/drawings', 'Drawings'], ['#/pm', 'PM check log'], ...(groups.Engineering || [])];
   const daily = [['#/daily', 'Daily board'], ...(groups['Daily work'] || [])];
-  groups.Production = [['#/operator', 'Operator form'], ['#/layout', 'Shop-floor layout'], ...(groups.Production || [])];
-  if (right('projects', 'create')) groups.Planning = [['#/project-new', 'New project (parts)'], ...(groups.Planning || [])];
+  groups.Production = [['#/operator', 'Operator form'], ['#/roster', 'Operator roster'], ['#/layout', 'Shop-floor layout'], ...(groups.Production || [])];
+  groups.Planning = [['#/plan', 'Production schedule'], ...(groups.Planning || [])];
+  if (right('projects', 'create')) groups.Planning = [['#/project-new', 'New project (parts)'], ...groups.Planning];
   delete groups['Daily work'];
   const sections = Object.entries({ 'Daily work': daily, ...groups });
   if (state.user.role === 'admin') sections.push(['Admin', [['#/users', 'Users'], ['#/rights', 'Access rights'], ['#/audit', 'Activity log']]]);
@@ -1752,6 +1940,8 @@ async function route() {
     else if (a === 'r') view = viewList(b);
     else if (a === 'drawings') view = await viewDrawings();
     else if (a === 'pm') view = await viewPm();
+    else if (a === 'plan') view = await viewPlan();
+    else if (a === 'roster') view = await viewRoster();
     else if (a === 'nesting') view = await viewNesting(Number(b));
     else if (a === 'daily') view = await viewDaily(b);
     else if (a === 'issue') view = await viewIssue(Number(b));
