@@ -67,6 +67,19 @@ function migrate(db) {
   const userCols = new Set(db.prepare('PRAGMA table_info(users)').all().map((c) => c.name));
   if (!userCols.has('process')) db.exec('ALTER TABLE users ADD COLUMN process TEXT');
   if (!userCols.has('theme')) db.exec('ALTER TABLE users ADD COLUMN theme TEXT'); // colour theme chosen by the user
+  // Appointed by Admin: may change any data. Extra processes: edit rights of other processes too.
+  if (!userCols.has('full_edit')) db.exec('ALTER TABLE users ADD COLUMN full_edit INTEGER NOT NULL DEFAULT 0');
+  if (!userCols.has('extra_processes')) db.exec('ALTER TABLE users ADD COLUMN extra_processes TEXT');
+  const auditCols = new Set(db.prepare('PRAGMA table_info(audit)').all().map((c) => c.name));
+  if (!auditCols.has('before')) db.exec('ALTER TABLE audit ADD COLUMN before TEXT');
+  if (!auditCols.has('after')) db.exec('ALTER TABLE audit ADD COLUMN after TEXT');
+  // Which process may change which module. Admin changes it on the Access rights page.
+  db.exec('CREATE TABLE IF NOT EXISTS process_rights (process TEXT NOT NULL, resource TEXT NOT NULL, PRIMARY KEY (process, resource))');
+  if (!db.prepare("SELECT 1 FROM meta WHERE key = 'process_rights_seeded'").get()) {
+    const ins = db.prepare('INSERT OR IGNORE INTO process_rights (process, resource) VALUES (?, ?)');
+    for (const [name, res] of Object.entries(resources)) for (const p of res.processes || []) ins.run(p, name);
+    db.prepare("INSERT INTO meta (key, value) VALUES ('process_rights_seeded', '1')").run();
+  }
   db.exec(`
     CREATE TABLE IF NOT EXISTS issue_replies (
       id INTEGER PRIMARY KEY,

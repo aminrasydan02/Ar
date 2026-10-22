@@ -532,3 +532,26 @@ test('shop-floor layout: starter layout, saved versions, live machine data, no c
   r = await call(admin, 'POST', '/api/layout', { floor: layout.floor, items: [{ type: 'script', x: 1, y: 1, w: 2, h: 1 }] });
   assert.equal(r.status, 400);
 });
+
+test('Admin appoints full-edit users and changes process rights at any time; changes are audited', async () => {
+  const u = (await call(admin, 'POST', '/api/users', { username: 'des9', role: 'planner', process: 'Designer', password: 'password123' })).data;
+  const des = await login('des9', 'password123');
+  assert.equal((await call(des, 'POST', '/api/machines', { code: 'M-D9', name: 'x', machine_type: 'Press brake' })).status, 403);
+  await call(admin, 'PUT', `/api/users/${u.id}`, { full_edit: true });
+  assert.equal((await call(des, 'POST', '/api/machines', { code: 'M-D9', name: 'x', machine_type: 'Press brake' })).status, 201);
+  assert.equal((await call(des, 'GET', '/api/me')).data.rights.job_travellers.approve, true);
+  await call(admin, 'PUT', `/api/users/${u.id}`, { full_edit: false, extra_processes: ['Technician'] });
+  assert.equal((await call(des, 'POST', '/api/plates', { material: 'SS', thickness: 2, qty: 1 })).status !== 403, true);
+  await call(admin, 'PUT', `/api/users/${u.id}`, { extra_processes: [] });
+  // Rights table: give Designer the machines module, then take it away again.
+  const rights = (await call(admin, 'GET', '/api/rights')).data;
+  assert.equal((await call(des, 'PUT', '/api/rights', { rights })).status, 403);
+  await call(admin, 'PUT', '/api/rights', { rights: [...rights, { process: 'Designer', resource: 'machines' }] });
+  assert.equal((await call(des, 'POST', '/api/machines', { code: 'M-D10', name: 'x', machine_type: 'Press brake' })).status, 201);
+  await call(admin, 'PUT', '/api/rights', { rights });
+  assert.equal((await call(des, 'POST', '/api/machines', { code: 'M-D11', name: 'x', machine_type: 'Press brake' })).status, 403);
+  const log = (await call(admin, 'GET', '/api/audit')).data;
+  const change = log.find((a) => a.resource === 'users' && a.record_id === u.id && a.action === 'update' && JSON.parse(a.after).full_edit === true);
+  assert.equal(JSON.parse(change.before).full_edit, false);
+  assert.ok(log.some((a) => a.resource === 'access_rights'));
+});

@@ -10,14 +10,28 @@ const { resources } = require('./resources');
 
 const ROLES = ['admin', 'planner', 'viewer'];
 
-function mayWrite(res, role, process, roles) {
-  if (process && res.processes) return res.processes.includes(process) && (role !== 'viewer' || res.write.includes(role));
+// Process -> modules it may change, loaded from the process_rights table (setProcessRights).
+let processRights = null;
+function setProcessRights(rows) {
+  processRights = {};
+  for (const r of rows) (processRights[r.resource] = processRights[r.resource] || []).push(r.process);
+}
+const ownersOf = (name, res) => (processRights ? processRights[name] || null : res.processes || null);
+
+const userProcs = (u) => [u.process, ...(Array.isArray(u.extra_processes) ? u.extra_processes : String(u.extra_processes || '').split(','))].filter(Boolean);
+
+function mayWrite(who, name, res, roles) {
+  const role = who.role;
+  if (who.full_edit && role !== 'viewer') return true; // appointed by Admin
+  const mine = userProcs(who);
+  const owners = ownersOf(name, res);
+  if (mine.length && owners) return mine.some((p) => owners.includes(p)) && (role !== 'viewer' || res.write.includes(role));
   return roles.includes(role);
 }
 
 function can(who, action, resourceName) {
-  const role = typeof who === 'string' ? who : who && who.role;
-  const process = typeof who === 'string' ? null : who && who.process;
+  if (typeof who === 'string') who = { role: who };
+  const role = who && who.role;
   if (!ROLES.includes(role)) return false;
   if (role === 'admin') return true;
   if (resourceName === 'users') return false;
@@ -28,11 +42,11 @@ function can(who, action, resourceName) {
     case 'export':
       return true;
     case 'create':
-      return !res.noCreate && mayWrite(res, role, process, res.write);
+      return !res.noCreate && mayWrite(who, resourceName, res, res.write);
     case 'update':
-      return !res.noUpdate && mayWrite(res, role, process, res.write);
+      return !res.noUpdate && mayWrite(who, resourceName, res, res.write);
     case 'upload':
-      return mayWrite(res, role, process, res.upload || []);
+      return mayWrite(who, resourceName, res, res.upload || []);
     case 'delete':
       return false;
     default:
@@ -57,11 +71,11 @@ function rightsFor(who) {
 }
 
 // Approving a Job Traveller: Manager (any role but viewer) or Admin.
-const canApprove = (u) => !!u && (u.role === 'admin' || (u.process === 'Manager' && u.role !== 'viewer'));
+const canApprove = (u) => !!u && (u.role === 'admin' || (u.role !== 'viewer' && (u.full_edit || u.process === 'Manager')));
 
 // Editing the shop-floor layout: Admin, or Planner / Supervisor / Technician / Manager.
 const LAYOUT_PROCESSES = ['Planner', 'Supervisor', 'Technician', 'Manager'];
-const canEditLayout = (u) => !!u && (u.role === 'admin' ||
-  (u.role === 'planner' && (!u.process || LAYOUT_PROCESSES.includes(u.process))));
+const canEditLayout = (u) => !!u && (u.role === 'admin' || (u.role === 'planner' &&
+  (u.full_edit || !u.process || userProcs(u).some((p) => LAYOUT_PROCESSES.includes(p)))));
 
-module.exports = { ROLES, can, rightsFor, canApprove, canEditLayout };
+module.exports = { ROLES, can, rightsFor, canApprove, canEditLayout, setProcessRights };

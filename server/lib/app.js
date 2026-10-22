@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { resources, PROCESSES, MOVE_SIGN } = require('./resources');
-const { ROLES, can, rightsFor, canApprove, canEditLayout } = require('./perm');
+const { ROLES, can, rightsFor, canApprove, canEditLayout, setProcessRights } = require('./perm');
 const { checkLayout, starterLayout } = require('./layout');
 const auth = require('./auth');
 const { FORMATS, MODEL_FORMATS, MIME, parseDrawingName, safeFilename, checkContent } = require('./drawings');
@@ -33,6 +33,8 @@ class HttpError extends Error {
 
 function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Metal Department', publicHosts = [] }) {
   fs.mkdirSync(drawingsDir, { recursive: true });
+  const loadRights = () => setProcessRights(db.prepare('SELECT process, resource FROM process_rights').all());
+  loadRights();
 
   function send(res, status, body, headers = {}) {
     const isBuf = Buffer.isBuffer(body);
@@ -68,9 +70,11 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
     try { return JSON.parse(buf.toString('utf8') || '{}'); } catch { throw new HttpError(400, 'Invalid JSON'); }
   }
 
-  function audit(user, action, resource, id) {
-    db.prepare('INSERT INTO audit (username, action, resource, record_id) VALUES (?, ?, ?, ?)')
-      .run(user ? user.username : null, action, resource, id ?? null);
+  // before / after: the record as JSON, so every change can be traced (who, when, what).
+  function audit(user, action, resource, id, before, after) {
+    const js = (v) => (v === undefined || v === null ? null : JSON.stringify(v));
+    db.prepare('INSERT INTO audit (username, action, resource, record_id, before, after) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(user ? user.username : null, action, resource, id ?? null, js(before), js(after));
   }
 
   function allow(user, action, resource) {
@@ -245,7 +249,7 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
       const id = Number(r.lastInsertRowid);
       if (stock) setStock(stock.item.id, (stock.item.qty_on_hand || 0) + stock.delta);
       if (name === 'inventory_items' && data.qty_on_hand > 0) logMove(id, 'Receive', data.qty_on_hand, user, 'Opening stock');
-      audit(user, 'create', name, id);
+      audit(user, 'create', name, id, null, data);
       return getRecord(name, id);
     } catch (err) { throw friendlyDbError(err); }
   }
@@ -271,8 +275,10 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
           .run(...cols.map((c) => data[c]), id);
       } catch (err) { throw friendlyDbError(err); }
     }
-    audit(user, 'update', name, id);
-    return getRecord(name, id);
+    const after = getRecord(name, id);
+    const changed = (o) => Object.fromEntries(cols.map((c) => [c, o[c] ?? null]));
+    audit(user, 'update', name, id, changed(current), changed(after));
+    return after;
   }
 
   function deleteRecord(name, id, user) {
@@ -285,7 +291,7 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
     }
     db.prepare(`DELETE FROM ${name} WHERE id = ?`).run(id);
     if (name === 'drawings' && row.stored_name) fs.rmSync(path.join(drawingsDir, row.stored_name), { force: true });
-    audit(user, 'delete', name, id);
+    audit(user, 'delete', name, id, row, null);
   }
 
   function toCsv(name, rows) {
@@ -607,7 +613,7 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
   // ---- users --------------------------------------------------------------
 
   function publicUser(u) {
-    return { id: u.id, username: u.username, full_name: u.full_name, role: u.role, process: u.process || null, theme: u.theme || 'standard', active: !!u.active, created_at: u.created_at };
+    return { id: u.id, username: u.username, full_name: u.full_name, role: u.role, process: u.process || null, theme: u.theme || 'standard', full_edit: !!u.full_edit, extra_processes: String(u.extra_processes || '').split(',').filter(Boolean), active: !!u.active, created_at: u.created_at };
   }
 
   function checkProcess(p) {
@@ -615,6 +621,38 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
       throw new HttpError(400, `Process must be one of: ${PROCESSES.join(', ')}`);
     }
     return p || null;
+  }
+
+  function checkProcessList(list) {
+    const arr = Array.isArray(list) ? list : String(list || '').split(',').map((x) => x.trim()).filter(Boolean);
+    arr.forEach(checkProcess);
+    return arr.length ? [...new Set(arr)].join(',') : null;
+  }
+
+  // Access rights: which process may change which module. Admin only; applies on the next request.
+  async function handleRights(req, res, method, user) {
+    if (!user) throw new HttpError(401, 'Please sign in');
+    const rows = () => db.prepare('SELECT process, resource FROM process_rights ORDER BY resource, process').all();
+    if (method === 'GET') return send(res, 200, rows());
+    if (user.role !== 'admin') throw new HttpError(403, 'Only Admin can change access rights');
+    if (method !== 'PUT') throw new HttpError(405, 'Method not allowed');
+    const b = await readJson(req);
+    const list = Array.isArray(b.rights) ? b.rights : [];
+    for (const r of list) {
+      checkProcess(r.process);
+      if (!resources[r.resource]) throw new HttpError(400, `Unknown module ${r.resource}`);
+    }
+    const before = rows();
+    db.exec('BEGIN');
+    try {
+      db.exec('DELETE FROM process_rights');
+      const ins = db.prepare('INSERT OR IGNORE INTO process_rights (process, resource) VALUES (?, ?)');
+      for (const r of list) ins.run(r.process, r.resource);
+      db.exec('COMMIT');
+    } catch (err) { db.exec('ROLLBACK'); throw err; }
+    loadRights();
+    audit(user, 'update', 'access_rights', null, before, rows());
+    return send(res, 200, rows());
   }
 
   async function handleUsers(req, res, method, id, user) {
@@ -632,10 +670,11 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
       const proc = checkProcess(b.process);
       noCode('Full name', b.full_name || '');
       try {
-        const r = db.prepare('INSERT INTO users (username, full_name, role, process, password_hash) VALUES (?, ?, ?, ?, ?)')
-          .run(username, String(b.full_name || ''), b.role, proc, auth.hashPassword(b.password));
-        audit(user, 'create', 'users', Number(r.lastInsertRowid));
-        return send(res, 201, publicUser(db.prepare('SELECT * FROM users WHERE id = ?').get(r.lastInsertRowid)));
+        const r = db.prepare('INSERT INTO users (username, full_name, role, process, full_edit, extra_processes, password_hash) VALUES (?, ?, ?, ?, ?, ?, ?)')
+          .run(username, String(b.full_name || ''), b.role, proc, b.full_edit ? 1 : 0, checkProcessList(b.extra_processes), auth.hashPassword(b.password));
+        const created = publicUser(db.prepare('SELECT * FROM users WHERE id = ?').get(r.lastInsertRowid));
+        audit(user, 'create', 'users', created.id, null, created);
+        return send(res, 201, created);
       } catch (err) { throw friendlyDbError(err); }
     }
     const target = id && db.prepare('SELECT * FROM users WHERE id = ?').get(id);
@@ -651,15 +690,18 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
       db.prepare('UPDATE users SET full_name = COALESCE(?, full_name), role = COALESCE(?, role), active = COALESCE(?, active) WHERE id = ?')
         .run(b.full_name ?? null, b.role ?? null, b.active === undefined ? null : (b.active ? 1 : 0), id);
       if (b.process !== undefined) db.prepare('UPDATE users SET process = ? WHERE id = ?').run(checkProcess(b.process), id);
+      if (b.full_edit !== undefined) db.prepare('UPDATE users SET full_edit = ? WHERE id = ?').run(b.full_edit ? 1 : 0, id);
+      if (b.extra_processes !== undefined) db.prepare('UPDATE users SET extra_processes = ? WHERE id = ?').run(checkProcessList(b.extra_processes), id);
       if (b.password) db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(auth.hashPassword(b.password), id);
       if (b.active === false || b.password) db.prepare('DELETE FROM sessions WHERE user_id = ?').run(id);
-      audit(user, 'update', 'users', id);
-      return send(res, 200, publicUser(db.prepare('SELECT * FROM users WHERE id = ?').get(id)));
+      const after = publicUser(db.prepare('SELECT * FROM users WHERE id = ?').get(id));
+      audit(user, 'update', 'users', id, publicUser(target), after);
+      return send(res, 200, after);
     }
     if (method === 'DELETE') {
       if (target.id === user.id) throw new HttpError(400, 'You cannot delete your own account');
       db.prepare('DELETE FROM users WHERE id = ?').run(id);
-      audit(user, 'delete', 'users', id);
+      audit(user, 'delete', 'users', id, publicUser(target), null);
       return send(res, 204, '');
     }
     throw new HttpError(405, 'Method not allowed');
@@ -758,6 +800,7 @@ function createApp({ db, drawingsDir, secureCookies = false, company = 'Sheet Me
       return send(res, 200, { resources: meta, formats: FORMATS, roles: ROLES, processes: PROCESSES, company });
     }
     if (parts[0] === 'dashboard' && method === 'GET') return send(res, 200, buildDashboard(db));
+    if (parts[0] === 'rights') return handleRights(req, res, method, user);
     if (parts[0] === 'users') return handleUsers(req, res, method, parts[1] ? Number(parts[1]) : null, user);
     if (parts[0] === 'audit' && method === 'GET') {
       if (user.role !== 'admin') throw new HttpError(403, 'Only Admin can view the audit log');

@@ -26,10 +26,11 @@ function createSession(db, userId) {
 
 function userForToken(db, token) {
   if (!token) return null;
-  const row = db.prepare(`SELECT u.id, u.username, u.full_name, u.role, u.process, u.theme, u.active, s.expires
+  const row = db.prepare(`SELECT u.id, u.username, u.full_name, u.role, u.process, u.theme, u.full_edit, u.extra_processes, u.active, s.expires
     FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?`).get(token);
   if (!row || !row.active || row.expires < new Date().toISOString()) return null;
-  return { id: row.id, username: row.username, full_name: row.full_name, role: row.role, process: row.process, theme: row.theme || 'standard' };
+  return { id: row.id, username: row.username, full_name: row.full_name, role: row.role, process: row.process, theme: row.theme || 'standard',
+    full_edit: !!row.full_edit, extra_processes: String(row.extra_processes || '').split(',').filter(Boolean) };
 }
 
 function destroySession(db, token) {

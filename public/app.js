@@ -1048,16 +1048,17 @@ async function viewUsers() {
   async function load() {
     const users = await api('GET', '/api/users');
     box.replaceChildren(h('div', { class: 'table-wrap' }, h('table', {},
-      h('thead', {}, h('tr', {}, ['Username', 'Name', 'Role', 'Process', 'Active', 'Created'].map((t) => h('th', {}, t)))),
+      h('thead', {}, h('tr', {}, ['Username', 'Name', 'Role', 'Process', 'Also edits for', 'Full edit', 'Active', 'Created'].map((t) => h('th', {}, t)))),
       h('tbody', {}, users.map((u) => h('tr', { class: 'click', onclick: () => userForm(u, load) },
         h('td', {}, u.username), h('td', {}, u.full_name || ''), h('td', {}, h('span', { class: 'role' }, u.role)), h('td', {}, u.process || ''),
+        h('td', {}, u.extra_processes.join(', ')), h('td', {}, u.full_edit ? h('span', { class: 'pill warn' }, 'Appointed') : ''),
         h('td', {}, u.active ? h('span', { class: 'pill ok' }, 'Active') : h('span', { class: 'pill bad' }, 'Disabled')),
         h('td', {}, u.created_at)))))));
   }
   await load();
   return [
     h('div', { class: 'toolbar' }, h('h1', { class: 'grow' }, 'Users'), h('button', { class: 'btn primary', onclick: () => userForm(null, load) }, '+ New user')),
-    h('p', { class: 'muted' }, 'Admin: everything. Planner: view all, create and update projects, parts, routing and nesting, upload drawings, export; cannot delete. Viewer: view and export. Everyone can write their daily log, raise issues and reply to them.'),
+    h('p', { class: 'muted' }, 'Everyone can view all data. A user can change only the data of their own process (see Access rights), plus any extra processes ticked here. "Full edit" is for users appointed by Admin: they can change all data (not users or deletes). Viewer: view and export only. Changes apply at once and are recorded in the Activity log.'),
     h('p', { class: 'muted' }, `Process is the person's job (${state.meta.processes.join(', ')}). New daily log entries and issues start with it.`),
     box,
   ];
@@ -1072,7 +1073,11 @@ function userForm(u, reload) {
     h('div', {}, h('label', {}, 'Process'), h('select', { name: 'process' }, h('option', { value: '' }, ''),
       state.meta.processes.map((p) => h('option', { value: p, selected: u ? u.process === p : false }, p)))),
     h('div', {}, h('label', {}, u ? 'New password (leave empty to keep)' : 'Password (8+ characters)'), h('input', { type: 'password', name: 'password', autocomplete: 'new-password' })),
-    u ? h('div', {}, h('label', {}, h('input', { type: 'checkbox', name: 'active', checked: u.active }), ' Active')) : null);
+    h('div', { class: 'full' }, h('label', {}, 'Can also edit the data of'), h('div', {}, state.meta.processes.map((p) =>
+      h('label', { class: 'chk' }, h('input', { type: 'checkbox', name: 'extra', value: p, checked: !!(u && u.extra_processes.includes(p)) }), p)))),
+    h('div', { class: 'full' }, h('label', { class: 'chk' }, h('input', { type: 'checkbox', name: 'full_edit', checked: !!(u && u.full_edit) }),
+      h('strong', {}, 'Full edit (appointed by Admin)'), ' can change all data in every module')),
+    u ? h('div', {}, h('label', { class: 'chk' }, h('input', { type: 'checkbox', name: 'active', checked: u.active }), ' Active')) : null);
   f.addEventListener('submit', (e) => e.preventDefault());
   openModal(u ? `User: ${u.username}` : 'New user', [err, f], (close) => [
     u && u.id !== state.user.id ? h('button', { class: 'btn danger left', onclick: async () => {
@@ -1081,7 +1086,8 @@ function userForm(u, reload) {
     } }, 'Delete') : null,
     h('button', { class: 'btn', onclick: close }, 'Cancel'),
     h('button', { class: 'btn primary', onclick: async () => {
-      const body = { full_name: f.elements.full_name.value, role: f.elements.role.value, process: f.elements.process.value };
+      const body = { full_name: f.elements.full_name.value, role: f.elements.role.value, process: f.elements.process.value,
+        full_edit: f.elements.full_edit.checked, extra_processes: [...f.querySelectorAll('[name="extra"]:checked')].map((c) => c.value) };
       if (f.elements.password.value) body.password = f.elements.password.value;
       try {
         if (u) { body.active = f.elements.active.checked; await api('PUT', `/api/users/${u.id}`, body); }
@@ -1092,12 +1098,43 @@ function userForm(u, reload) {
   ]);
 }
 
+// What changed: "field: old → new" for updates, the values for create/delete.
+function auditChange(r) {
+  const parse = (v) => { try { return v ? JSON.parse(v) : null; } catch { return null; } };
+  const b = parse(r.before), a = parse(r.after);
+  if (Array.isArray(a) || Array.isArray(b)) return `${(b || []).length} → ${(a || []).length} rights`;
+  const show = (v) => (v === null || v === undefined || v === '' ? '—' : typeof v === 'object' ? JSON.stringify(v) : String(v));
+  const keys = [...new Set([...Object.keys(b || {}), ...Object.keys(a || {})])].filter((k) => !b || !a || show(b[k]) !== show(a[k]));
+  return keys.slice(0, 8).map((k) => (b && a ? `${k}: ${show(b[k])} → ${show(a[k])}` : `${k}: ${show((a || b)[k])}`)).join('; ');
+}
+
 async function viewAudit() {
   const rows = await api('GET', '/api/audit');
-  return [h('h1', {}, 'Activity log'), h('div', { class: 'table-wrap' }, h('table', {},
-    h('thead', {}, h('tr', {}, ['When (UTC)', 'User', 'Action', 'Module', 'Record'].map((t) => h('th', {}, t)))),
-    h('tbody', {}, rows.map((r) => h('tr', {}, h('td', {}, r.at), h('td', {}, r.username || ''), h('td', {}, r.action),
-      h('td', {}, r.resource), h('td', { class: 'num' }, r.record_id ?? ''))))))];
+  return [h('h1', {}, 'Activity log'), h('p', { class: 'muted' }, 'Every change: who, when, and the values before and after.'),
+    h('div', { class: 'table-wrap' }, h('table', {},
+      h('thead', {}, h('tr', {}, ['When (UTC)', 'User', 'Action', 'Module', 'Record', 'Change'].map((t) => h('th', {}, t)))),
+      h('tbody', {}, rows.map((r) => h('tr', {}, h('td', {}, fmtDate(r.at)), h('td', {}, r.username || ''), h('td', {}, r.action),
+        h('td', {}, (state.meta.resources[r.resource] || {}).label || r.resource), h('td', { class: 'num' }, r.record_id ?? ''),
+        h('td', { class: 'wrap' }, auditChange(r)))))))];
+}
+
+// Admin: tick which process may change which module. Takes effect on the next click of every user.
+async function viewRights() {
+  const rows = await api('GET', '/api/rights');
+  const on = new Set(rows.map((r) => `${r.process}|${r.resource}`));
+  const procs = state.meta.processes;
+  const mods = Object.entries(state.meta.resources).filter(([, r]) => r.write.length < 3 || r.processes);
+  const table = h('table', {},
+    h('thead', {}, h('tr', {}, h('th', {}, 'Module'), procs.map((p) => h('th', {}, p)))),
+    h('tbody', {}, mods.map(([name, r]) => h('tr', {}, h('td', {}, r.label),
+      procs.map((p) => h('td', {}, h('input', { type: 'checkbox', 'data-p': p, 'data-r': name, checked: on.has(`${p}|${name}`) })))))));
+  return [h('div', { class: 'toolbar' }, h('h1', { class: 'grow' }, 'Access rights'),
+    h('button', { class: 'btn primary', onclick: async () => {
+      const rights = [...table.querySelectorAll('input:checked')].map((c) => ({ process: c.dataset.p, resource: c.dataset.r }));
+      try { await api('PUT', '/api/rights', { rights }); toast('Access rights saved'); } catch (e) { toast(e.message, true); }
+    } }, 'Save')),
+    h('p', { class: 'muted' }, 'Which process may add and change each module. Everyone can view all modules. Daily log, Issues and Stock log are open to all. Admin and Full-edit users can change everything.'),
+    h('div', { class: 'table-wrap' }, table)];
 }
 
 function viewAccount() {
@@ -1183,7 +1220,7 @@ function renderShell() {
     h('div', { class: 'brand' }, h('img', { src: 'icon.svg', alt: '' }), h('div', {}, 'Sheet Metal Manager', h('div', { class: 'brand-sub' }, state.meta.company))),
     h('a', { href: '#/' }, 'Dashboard'),
     Object.entries({ 'Daily work': daily, ...groups }).map(([g, links]) => [h('h4', {}, g), links.map(([href, label]) => h('a', { href }, label))]),
-    state.user.role === 'admin' ? [h('h4', {}, 'Admin'), h('a', { href: '#/users' }, 'Users'), h('a', { href: '#/audit' }, 'Activity log')] : null,
+    state.user.role === 'admin' ? [h('h4', {}, 'Admin'), h('a', { href: '#/users' }, 'Users'), h('a', { href: '#/rights' }, 'Access rights'), h('a', { href: '#/audit' }, 'Activity log')] : null,
     h('h4', {}, 'Account'), h('a', { href: '#/account' }, 'My account'));
   const search = h('form', { class: 'find', role: 'search', onsubmit: (e) => {
     e.preventDefault();
@@ -1225,6 +1262,7 @@ async function route() {
     else if (a === 'ncr' && c === 'print') view = await viewNcrPrint(Number(b));
     else if (a === 'users') view = await viewUsers();
     else if (a === 'audit') view = await viewAudit();
+    else if (a === 'rights') view = await viewRights();
     else if (a === 'account') view = viewAccount();
     else view = [h('h1', {}, 'Page not found')];
   } catch (e) {
