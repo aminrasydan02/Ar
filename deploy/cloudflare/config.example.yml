@@ -1,0 +1,13 @@
+# Cloudflare Tunnel (cloudflared) for Sheet Metal Manager.
+# Copy to config.yml and fill in your own tunnel ID and hostname.
+# Only needed for a locally managed tunnel. With a token from the Cloudflare
+# dashboard, run-tunnel.ps1 / run-tunnel.sh is enough and this file is not used.
+tunnel: <TUNNEL-ID>
+credentials-file: C:\Users\<user>\.cloudflared\<TUNNEL-ID>.json
+
+ingress:
+  - hostname: smm.example.com
+    service: http://127.0.0.1:8080
+    originRequest:
+      connectTimeout: 30s
+  - service: http_status:404

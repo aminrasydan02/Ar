@@ -5,7 +5,8 @@ laser nesting, machines, tooling, plate stock, drawings, maintenance, NCR and wo
 Everyone uses it from a browser (PC, tablet or phone) on the factory network; there is
 nothing to install on each PC.
 
-Version 2.0.0 is the web edition of the Sheet Metal Manager 1.4.0 Windows app.
+This is a website only: the server runs on one PC on the factory network and everyone
+else opens it in a browser.
 
 ## Roles
 
@@ -15,7 +16,19 @@ Version 2.0.0 is the web edition of the Sheet Metal Manager 1.4.0 Windows app.
 | Planner | View all; create and update projects, parts, routing and nesting; upload drawings; create workflow from routing; export. Cannot delete, and cannot change machines, tooling, plate stock, maintenance, NCR or workflow status |
 | Viewer | View, open/download drawings and export only |
 
+Each user also has a **process** (Designer, Planner, Engineer, Technician, Supervisor,
+Operator, Manager). Everyone can read everything (to share information), but a user with a
+process may only create and change the data that process owns (`OWNERS` in
+`server/lib/resources.js`), e.g. Technician: machines, plate stock, maintenance, inventory;
+Operator: own output; Manager: owns no shop data, approves Job Travellers. Daily log,
+issues and the stock log are open to everyone.
+
 Rules are enforced by the server (`server/lib/perm.js`), not only hidden in the screens.
+
+**Security**: text that looks like HTML or script is refused, uploads are checked by their
+content (PDF, STEP, DWG, DXF, PNG, JPG headers; programs and web pages are refused), SQL is
+always parameterised, 5 wrong passwords lock a username for 15 minutes, and pages are sent
+with a strict Content-Security-Policy. There is no feature that runs code from the website.
 
 ## Install on the department server
 
@@ -38,8 +51,8 @@ npm run seed-demo
 ```
 
 Settings: copy `config.example.json` to `config.json`, or use environment variables
-`PORT`, `HOST`, `DATA_DIR`, `SECURE_COOKIES=1` (when served over HTTPS) and `ADMIN_PASSWORD`
-(first start only).
+`PORT`, `HOST`, `DATA_DIR`, `SECURE_COOKIES=1` (when served over HTTPS), `COMPANY` (printed on
+Job Travellers and NCRs) and `ADMIN_PASSWORD` (first start only).
 
 Forgotten admin password:
 
@@ -56,13 +69,38 @@ Everything lives in the `data` folder: `smm.sqlite` (database) and `drawings/` (
 files). Back up the whole folder. For a consistent copy, stop the server first or copy
 during a quiet period.
 
+Automatic backups (every 24 hours, kept 30 days then monthly) go to `data/backups/` and,
+when set up, to Cloudflare R2 or Amazon S3. Admin > Database & backup downloads a full
+backup or a SQL script for another database.
+
+## Other databases, export and publishing
+
+SQLite is the default. PostgreSQL, MySQL/MariaDB, SQL Server, Oracle, Cloudflare D1 and
+Turso are chosen with `DATABASE_URL`. Moving data, backups to R2/S3, Google BigQuery,
+Docker / cloud server set-up, Cloudflare Tunnel and every table and field are in
+[docs/PANDUAN-DATABASE.md](docs/PANDUAN-DATABASE.md) (Malay).
+
 ## Modules
 
-- **Dashboard**: KPIs, project progress, workflow board, machine load (480 min/day),
+- **Job Traveller**: one per part order (`JT-YYYY-0001`), with its process routing (Seq,
+  process, cycle time, target). The Planner enters it on the website or uses **Import Excel**:
+  the NEWAYS schedule reports and the combined dashboard (Fact_Production table) are read,
+  shown as a preview, then saved. **Print / PDF** gives an A4 traveller with sign-off boxes.
+- **Operator form**: one form for every shop process. Pick the process and Job Traveller,
+  key in good, reject, run time, downtime, reject/downtime code and the process's own fields.
+- **Shop processes** and **Reason codes** are data. Laser Cutting, Clinching, Bending and
+  Polishing, and the Polishing codes DT-01…05 / RJ-01…05, are added on first start; Admin
+  adds more (e.g. Welding) without code changes.
+- **Daily board / Daily log / Issues**: daily work per job process (Designer → Operator),
+  handovers, and problems raised from one process to another with a discussion.
+- **Dashboard**: production by process (target, good, balance, completion, first-pass
+  yield, remaining workload and the bottleneck process), KPIs, project progress, workflow
+  board, machine load (465 net min/day),
   maintenance availability, MTBF and MTTR for the last 30 days, plates at or below minimum.
 - **Projects**: open a project to plan parts (child parts shown under their parent),
   routing per part, laser nesting, drawings and NCRs.
-- **Drawings**: drag and drop pdf, dwg, idw, slddrw, ipt, iam, sldprt, sldasm or dxf.
+- **Drawings**: drag and drop pdf, dwg, dxf, idw, slddrw, STEP (.step/.stp), ipt, iam,
+  sldprt, sldasm, png or jpg, also from the Job Traveller page.
   The part number and revision are read from the file name (`606118901_PART_1 Rev C.pdf`);
   the older revision becomes Superseded. PDFs open in the browser; CAD files download.
 - **Maintenance**: preventive, breakdown and inspection work orders with downtime.
@@ -70,7 +108,33 @@ during a quiet period.
   signature boxes.
 - **Workflow**: "Create workflow" on a part builds the steps from its routing
   (Drawing review → Programming → operations → QC → Packing → Delivery).
+- **Find Job Traveller**: the search box at the top of every page. The Job Traveller page shows
+  where the item is now, each stage (Done / In progress / Pending with good and reject qty),
+  mother and child parts, drawings and STEP files, and issues.
+- **New project (parts)**: the Planner enters a mother part and its child parts (any depth,
+  qty per parent), and can create a Job Traveller with routing for every part in one go.
+- **Inventory** and **Stock log**: operator tools, maintenance spares and equipment with
+  location, minimum stock and a Low / Out alert on the dashboard. Every use, check-out,
+  return or receipt is logged by user, process, machine and maintenance work order.
+- **Colour theme**: Standard, Light, Dark, Soft green or High contrast, under My account.
+- **Excel templates**: Template / Import template / Export Excel on every list.
 - **Export CSV** on every list (opens in Excel).
+- **Publish** through Cloudflare Tunnel: see `deploy/cloudflare/README.md`.
+
+## Preview with the department's data
+
+```
+node tools/preview/load.js /tmp/smm-preview <neways-reports-dir> <maintenance-bom-dir>
+node tools/preview/build.js /tmp/smm-preview preview.html
+THEME=galaxy node tools/preview/build.js /tmp/smm-preview preview.html   # opens in the Galaxy theme and Cockpit dashboard
+```
+
+`load.js` fills a new database through the website's own API: NEWAYS schedule reports and
+master dashboard (Job Travellers, one step per part and process, duplicates merged),
+maintenance checklists (PM checklist and work order log per machine), the Sheetmetal BOM
+(a project with its mother and child parts) and a shop-floor layout. It writes
+`data-check.md` listing what was merged and what needs checking. `build.js` turns it into
+one read-only HTML page.
 
 ## Development
 
@@ -84,7 +148,5 @@ the tables, API, forms and lists are built from those definitions.
 
 ## Open points
 
-- Clinching cycle time: the NEWAYS report says 2.92 min, but 5 × 20 s + 15 s = 1.92 min.
-  Confirm before entering routing times.
-- Not yet carried over from 1.4.0: Excel import, DXF preview, PM plans with checklists and
-  machine reading logs, NCR export to Excel, online update for the desktop app.
+- Not built yet: DXF preview, PM plans with checklists and machine reading logs, BOM,
+  NCR export to Excel.

@@ -1,6 +1,6 @@
 {
   "name": "sheet-metal-manager-web",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Sheet Metal Manager web system for the Sheet Metal Department: projects, parts, routing, nesting, machines, drawings, maintenance, NCR and workflow.",
   "private": true,
   "main": "server/server.js",
