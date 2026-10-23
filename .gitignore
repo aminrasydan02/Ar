@@ -218,3 +218,13 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Sheet Metal Manager
+node_modules/
+/data/
+/config.json
+!server/lib/
+
+# Cloudflare Tunnel files with secrets
+deploy/cloudflare/config.yml
+*.cloudflared.json

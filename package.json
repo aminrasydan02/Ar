@@ -1,0 +1,16 @@
+{
+  "name": "sheet-metal-manager-web",
+  "version": "2.1.0",
+  "description": "Sheet Metal Manager web system for the Sheet Metal Department: projects, parts, routing, nesting, machines, drawings, maintenance, NCR and workflow.",
+  "private": true,
+  "main": "server/server.js",
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning server/server.js",
+    "seed-demo": "node --disable-warning=ExperimentalWarning server/server.js seed-demo",
+    "test": "node --disable-warning=ExperimentalWarning --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "license": "BSL-1.0"
+}

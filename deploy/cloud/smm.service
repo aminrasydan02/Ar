@@ -1,0 +1,20 @@
+# systemd service for Sheet Metal Manager without Docker. install.sh copies this to /etc/systemd/system/.
+[Unit]
+Description=Sheet Metal Manager
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=smm
+WorkingDirectory=/opt/smm
+EnvironmentFile=/etc/smm.env
+ExecStart=/usr/bin/node --disable-warning=ExperimentalWarning server/server.js
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/smm/data
+
+[Install]
+WantedBy=multi-user.target

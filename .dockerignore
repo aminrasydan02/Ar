@@ -1,0 +1,10 @@
+.git
+.anchor
+node_modules
+data
+config.json
+.env
+test
+deploy
+*.md
+!README.md
